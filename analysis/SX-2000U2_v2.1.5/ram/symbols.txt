@@ -1,0 +1,9 @@
+# addr  name   (SX-2000U2 RAM image base 0x0, Thumb). Verified labels.
+0x0008b8d8  main
+0x000d8f04  printf_log
+0x000d9050  strcpy
+0x000d9062  strncpy
+0x000d8184  bswap16
+0x000d8194  bswap32
+0x000d81b4  put_le16
+0x000d843c  puts_log
