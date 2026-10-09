@@ -54,6 +54,11 @@ Usage
     python3 fw_codec.py encrypt firmware.dec.bin out.bin --recompute-checksums
     python3 fw_codec.py recompute in.bin out.bin
 
+    # Unpack to an editable flat image + manifest, then rebuild the container:
+    python3 fw_codec.py unpack F5L009_v1.2.0.bin out_dir/   # -> image.bin + manifest.json
+    #   ...edit out_dir/image.bin in place (length-preserving)...
+    python3 fw_codec.py pack   out_dir/ rebuilt.bin
+
 Checksums
 ---------
 The container is self-checked three ways (all computed over the ENCRYPTED
@@ -232,6 +237,125 @@ def iter_records(blob: bytes):
         off += RECORD_HEADER_SIZE + length
 
 
+def record_addr(flags: int, addr_lo: int) -> int:
+    """Load address of a record: flags low byte = bits 16..23, addr_lo = 0..15."""
+    return ((flags & 0xFF) << 16) | addr_lo
+
+
+MANIFEST_NAME = "manifest.json"
+IMAGE_NAME = "image.bin"
+
+
+def unpack(path: str, outdir: str) -> int:
+    """
+    Decrypt `path` into a flat firmware image plus an editable JSON manifest.
+
+    Writes <outdir>/image.bin (the de-obfuscated bytes laid out at their load
+    addresses) and <outdir>/manifest.json (the verbatim file header, the record
+    table, and the record-1 checksum seed) — everything `pack` needs to rebuild
+    the exact container.  Regions not covered by any record read back as zero.
+    """
+    import base64
+    import json
+    import os
+
+    data = open(path, "rb").read()
+    start = payload_start(data)
+    recs = [r for r in iter_records(data) if r[3] != SEQ_END]
+    if not recs:
+        raise ValueError("no payload records found")
+
+    spans = [(record_addr(f, a), l) for (_o, _c, _t, _s, f, a, l) in recs]
+    base = min(addr for addr, _ in spans)
+    size = max(addr + length for addr, length in spans) - base
+
+    image = bytearray(size)
+    table = []
+    for (off, _cs, typ, seq, flags, addr_lo, length) in recs:
+        addr = record_addr(flags, addr_lo)
+        key = key_for_seq(seq)
+        image[addr - base:addr - base + length] = \
+            bytes(b ^ key for b in data[off + RECORD_HEADER_SIZE:off + RECORD_HEADER_SIZE + length])
+        table.append({"seq": seq, "type": typ, "flags": flags,
+                      "addr_lo": addr_lo, "length": length})
+
+    # Trailer record header (seq=0xFFFF), followed by 4 regenerable bytes.
+    toff = recs[-1][0] + RECORD_HEADER_SIZE + recs[-1][6]
+    if toff + RECORD_HEADER_SIZE + TRAILER_TAIL != len(data):
+        raise ValueError("unexpected trailer layout")
+    trailer_hdr = data[toff:toff + RECORD_HEADER_SIZE]
+
+    device = _pstr(data, 0x07)
+    version = _pstr(data, 0x07 + 1 + len(device) + 1)
+    manifest = {
+        "format": ".VUP",
+        "device": device,
+        "version": version,
+        "image_file": IMAGE_NAME,
+        "image_size": size,
+        "base_addr": base,
+        "seed_checksum": recs[0][1],            # record 1's checksum (the seed)
+        "header_b64": base64.b64encode(data[:start]).decode("ascii"),
+        "trailer_b64": base64.b64encode(trailer_hdr).decode("ascii"),
+        "records": table,
+    }
+
+    os.makedirs(outdir, exist_ok=True)
+    with open(os.path.join(outdir, IMAGE_NAME), "wb") as f:
+        f.write(image)
+    with open(os.path.join(outdir, MANIFEST_NAME), "w") as f:
+        json.dump(manifest, f, indent=2)
+        f.write("\n")
+    print(f"unpack: {path} -> {outdir}/ "
+          f"({len(recs)} records, image 0x{size:x} bytes @ base 0x{base:x})")
+    return 0
+
+
+def pack(indir: str, outfile: str) -> int:
+    """
+    Rebuild a .VUP container from a manifest + flat image produced by `unpack`.
+
+    Reads each record's bytes from the flat image at its load address, re-applies
+    the per-record XOR, copies the verbatim file header and trailer, then rebuilds
+    all checksums.  With an unedited image this reproduces the original file
+    byte-for-byte; edits must stay within the existing record extents (the format
+    cannot grow a record).
+    """
+    import base64
+    import json
+    import os
+
+    with open(os.path.join(indir, MANIFEST_NAME)) as f:
+        m = json.load(f)
+    image = open(os.path.join(indir, m.get("image_file", IMAGE_NAME)), "rb").read()
+    base = m["base_addr"]
+
+    out = bytearray(base64.b64decode(m["header_b64"]))
+    for i, rec in enumerate(m["records"]):
+        seq, typ = rec["seq"], rec["type"]
+        flags, addr_lo, length = rec["flags"], rec["addr_lo"], rec["length"]
+        pos = record_addr(flags, addr_lo) - base
+        if pos < 0 or pos + length > len(image):
+            raise ValueError(
+                f"record seq={seq} wants image[0x{pos:x}:0x{pos + length:x}] "
+                f"but image is 0x{len(image):x} bytes"
+            )
+        key = key_for_seq(seq)
+        enc = bytes(b ^ key for b in image[pos:pos + length])
+        # Record 1 keeps the stored seed; other checksums are rebuilt below.
+        cs = m["seed_checksum"] if i == 0 else 0
+        out += struct.pack(">6H", cs, typ, seq, flags, addr_lo, length) + enc
+
+    out += base64.b64decode(m["trailer_b64"])     # trailer header (seq=0xFFFF)
+    out += b"\x00\x00\x00\x00"                     # seed echo + global checksum
+    out = recompute_checksums(out)
+
+    toggle(out)        # sanity: the result must parse/decrypt cleanly
+    open(outfile, "wb").write(out)
+    print(f"pack: {indir}/ -> {outfile} ({len(out)} bytes)")
+    return 0
+
+
 # Firmware images checked in beside this script, used as default self-test
 # fixtures when `selftest` is invoked with no path.
 FIXTURES = ("F5L009_v1.2.0.bin", "SX-2000U2_v2.1.5.bin")
@@ -384,6 +508,18 @@ def _dispatch(argv) -> int:
         open(argv[3], "wb").write(out)
         print(f"recompute: {argv[2]} -> {argv[3]} ({len(out)} bytes)")
         return 0
+
+    if cmd == "unpack":
+        if len(argv) != 4:
+            print("usage: fw_codec.py unpack <image.vup> <outdir>")
+            return 2
+        return unpack(argv[2], argv[3])
+
+    if cmd == "pack":
+        if len(argv) != 4:
+            print("usage: fw_codec.py pack <indir> <out.vup>")
+            return 2
+        return pack(argv[2], argv[3])
 
     print(f"unknown command: {cmd!r}")
     print(__doc__)
