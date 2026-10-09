@@ -1,0 +1,50 @@
+# 21 strings referenced by pc-relative pointer loads
+
+"silex"  @0x01020410
+    loaded @ 0x01021314
+    loaded @ 0x0102140c
+"SX-2000U2"  @0x01020420
+    loaded @ 0x01021320
+    loaded @ 0x01021414
+"2.1.5"  @0x01020430
+    loaded @ 0x0102132c
+    loaded @ 0x0102141c
+"Copyright (C) 2005-2008 silex technology, Inc."  @0x01020440
+    loaded @ 0x01021338
+    loaded @ 0x01021424
+" P!P""  @0x01029282
+    loaded @ 0x01025a80
+    loaded @ 0x01040e2c
+"_FVFMFDF"  @0x01029584
+    loaded @ 0x01049498
+"WFFF"  @0x01029f22
+    loaded @ 0x0104fb18
+"FRF!"  @0x0102b0e3
+    loaded @ 0x01044784
+"0#AFYC"  @0x0102e382
+    loaded @ 0x01023830
+    loaded @ 0x0106915c
+"%SK2"  @0x0102e418
+    loaded @ 0x0103072c
+"`b8h"  @0x0102e42e
+    loaded @ 0x01066518
+"!*x *"  @0x01038758
+    loaded @ 0x0102b914
+"Fhh1h"  @0x01038d49
+    loaded @ 0x0107e764
+"@ +)"  @0x0103af3f
+    loaded @ 0x0103b92c
+"L6cF2x"  @0x0103b678
+    loaded @ 0x010685c0
+"'MnF"  @0x01048548
+    loaded @ 0x01032eb8
+"!hjh"  @0x0105e60c
+    loaded @ 0x01063afc
+"uage"  @0x01079beb
+    loaded @ 0x0105dca8
+"<7940<3#*,"  @0x0107b305
+    loaded @ 0x01036158
+"*zT8"  @0x010842b8
+    loaded @ 0x010862a0
+"@sio0"  @0x0108d9d8
+    loaded @ 0x0106ee14

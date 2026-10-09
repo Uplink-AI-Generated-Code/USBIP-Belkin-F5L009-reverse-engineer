@@ -1,0 +1,43 @@
+# 18 strings referenced by pc-relative pointer loads
+
+"Belkin"  @0x01020410
+    loaded @ 0x0102132c
+    loaded @ 0x01021420
+"Network USB Hub"  @0x01020420
+    loaded @ 0x01021338
+    loaded @ 0x01021428
+"1.2.0"  @0x01020430
+    loaded @ 0x01021344
+    loaded @ 0x01021430
+"Copyright (C) 2007 Belkin International, Inc."  @0x01020440
+    loaded @ 0x01021350
+    loaded @ 0x01021438
+"l%`["  @0x0102d483
+    loaded @ 0x010535e4
+"U@F!"  @0x010381ee
+    loaded @ 0x010704e8
+"#SC["  @0x010384c0
+    loaded @ 0x01039e98
+"xKYF"  @0x010386bc
+    loaded @ 0x010708c8
+    loaded @ 0x01071530
+"GD;h"  @0x01038b04
+    loaded @ 0x01089e0c
+"&<#*"  @0x0103a3b8
+    loaded @ 0x0106f0a8
+"+h2h"  @0x0103aab1
+    loaded @ 0x0104c4b8
+"#x"+@"  @0x0103b247
+    loaded @ 0x0106f920
+"T0QF<"  @0x0103d224
+    loaded @ 0x0104d38c
+"bi jaj"  @0x0103dc0b
+    loaded @ 0x0102d8ec
+"&LcF"  @0x0103f642
+    loaded @ 0x0108c340
+"x, func"  @0x0107c183
+    loaded @ 0x01058ecc
+"rv_h"  @0x0107d049
+    loaded @ 0x0105b478
+" FALC"  @0x0108921c
+    loaded @ 0x0108d048

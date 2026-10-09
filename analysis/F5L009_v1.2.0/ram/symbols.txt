@@ -1,0 +1,18 @@
+# addr  name   (RAM image base 0x0, Thumb). Import into Ghidra/IDA.
+0x00336f24  printf_log
+0x00337070  strcpy
+0x00337084  strncpy
+0x003370a8  strcat
+0x0033652c  strlen
+0x003361e0  memset
+0x0033628c  bswap16
+0x003362bc  put_le16
+0x003362c4  get_le16
+0x003364b8  putc_logbuf
+0x00336544  puts_log
+0x00336518  put_crlf
+0x00339700  str_out
+0x0033967c  putc_out
+0x00339fa0  thumb_to_arm_veneer
+0x00335e70  malloc_block
+0x002f959c  main

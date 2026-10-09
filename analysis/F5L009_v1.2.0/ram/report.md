@@ -1,0 +1,112 @@
+# Static analysis (thumb) — ram.bin
+
+- Base 0x00000000, size 0x400000, 2022574 instrs decoded
+- Entry: 0x002f959c
+- 12696 strings; 3531 with xrefs
+- 17836 candidate functions (5105 push-lr, 13897 BL targets)
+- Code span (functions): 0x000ad7f8–0x00341446
+- Most-called: sub_00336f24 (888 sites)
+
+## identity
+- `    <manufacturer>Belkin International, Inc.</manufacturer>`
+- `    <manufacturerURL>http://www.belkin.com/</manufacturerURL>`
+- ` Belkin International, Inc. `
+- `214-silex FTPD supported commands(RFC959 subset + RFC2428):`
+- `215 silex FTP daemon.`
+- `<td><a href="http://www.belkin.com" target="_blank">Belkin International, Inc.</a></td>`
+- `Belkin`
+- `Belkin International, Inc.`
+- `Belkin International, Inc. `
+- `Copyright (C) 2007 Belkin International, Inc.`
+- `Enlace al website global de Belkin International, Inc..`
+- `Lien vers le site Web de Belkin International, Inc.`
+- `Link al sito globale Belkin International, Inc. .`
+- `Link naar Belkin International, Inc. website.`
+- `Link to Belkin International, Inc. global Web site.`
+- `Link zur globalen Website von Belkin International, Inc.`
+- `gina global web Belkin International, Inc..`
+- `silex-jp:device:NullDevice:1`
+- `silex-jp:service:NullService:1`
+- `silex-jp:serviceId:1`
+
+## net/proto
+- `    <manufacturerURL>http://www.belkin.com/</manufacturerURL>`
+- `   DHCP Server : `
+- `  <specVersion> <!-- UPnP version 1.0 -->`
+- ` DHCP `
+- ` DHCP/BOOTP `
+- ` FTP server.`
+- ` HTTP/1.1`
+- ` TELNET server.`
+- ` assegnato dal serverDHCP/BOOTP.`
+- ` un protocollo che ottiene un indirizzo IP dal server BOOTP o dal server DHCP. Se si utilizza un server DHCP/BOOTP , questo DHCP/BOOTP deve trovarsi nello stesso segmento di rete del dispositivo. Il dispositivo rileva automaticamente DHCP e BOOTP . Qualora ci sia pi`
+- `!DHCP:Disable ARP-IP`
+- `!DHCP:Disable IP-ARP`
+- `!DHCP:Enable ARP-IP`
+- `!DHCP:Enable IP-ARP`
+- `!DHCP:No tempbuf...use last offer`
+- `!DHCP:Re-Discover IP Address:%I`
+- `!DHCP:Rebind  T/O=%ld`
+- `!DHCP:UCB full`
+- `!DHCP:UDP error %x`
+- `!FTPD-PASV:Accept`
+- `!FTPD-PASV:Already open`
+- `!FTPD-PASV:Bind`
+- `!FTPD-PASV:Listen`
+- `!FTPD-PASV:No TCB`
+- `!FTPD-PASV:No port`
+
+## auth/web
+- `     location.href="../"+ url + ".htm";`
+- ` usata come password di autenticazione per configurare le modifche attraverso la pagina web. `
+- `' user needs password to login.`
+- `(Password)`
+- `/de/factory/exec.htm`
+- `/de/help_mnt.htm`
+- `/de/help_setup.htm`
+- `/de/help_status.htm`
+- `/de/index.htm`
+- `/de/lang/language.htm`
+- `/de/login/login.htm`
+- `/de/login/login_chk.htm`
+- `/de/login/set_error.htm`
+- `/de/mnt/adpass.htm`
+- `/de/mnt/loginfo.htm`
+- `/de/mnt/reset.htm`
+- `/de/mnt/set_error.htm`
+- `/de/mnt/sysinfo.htm`
+- `/de/mnt/update.htm`
+- `/de/print/exec.htm`
+- `/de/reset/exec.htm`
+- `/de/setup/dserv_h.htm`
+- `/de/setup/dserver.htm`
+- `/de/setup/network.htm`
+- `/de/setup/security.htm`
+
+## firmware
+- `  </specVersion>`
+- `  <specVersion>`
+- `  <specVersion> <!-- UPnP version 1.0 -->`
+- ` Version `
+- ` seguro de que desea actualizar el firmware?`
+- `!IP:Bad version(%d) from %M`
+- `'DISH' Debugging shell Version 2.5.0`
+- `/de/mnt/update.htm`
+- `/en/mnt/update.htm`
+- `/es/mnt/update.htm`
+- `/fr/mnt/update.htm`
+- `/it/mnt/update.htm`
+- `/ja/mnt/update.htm`
+- `/ko/mnt/update.htm`
+- `/nl/mnt/update.htm`
+- `/pt/mnt/update.htm`
+- `/tch/mnt/update.htm`
+- `/zh/mnt/update.htm`
+- `<?xml version="1.0"?>`
+- `<div id='UPDATE' style="display:none">`
+- `<td width="20%" class="co3"><a href="./update.htm"><j mlword:003c></a></td>`
+- `<td width="25%" class="co"><a href="./network.htm" onClick="window.parent.mw.UpdateFromSlave()"><j mlword:0015></a></td>`
+- `<td width="25%" class="co"><a href="./security.htm" onClick="window.parent.mw.UpdateFromSlave()"><j mlword:001b></a></td>`
+- `?HTTP:eeprom_write`
+- `?IP:address updated`
+

@@ -1,0 +1,19 @@
+# Exception vectors (file offset 0) and their literal-pool targets
+
+0x01020000:  18f09fe5  ldr pc, [pc, #0x18]  ; Reset
+0x01020004:  18f09fe5  ldr pc, [pc, #0x18]  ; Undef
+0x01020008:  18f09fe5  ldr pc, [pc, #0x18]  ; SWI/SVC
+0x0102000c:  18f09fe5  ldr pc, [pc, #0x18]  ; Prefetch Abort
+0x01020010:  18f09fe5  ldr pc, [pc, #0x18]  ; Data Abort
+0x01020014:  18f09fe5  ldr pc, [pc, #0x18]  ; (reserved)
+0x01020018:  18f09fe5  ldr pc, [pc, #0x18]  ; IRQ
+0x0102001c:  18f09fe5  ldr pc, [pc, #0x18]  ; FIQ
+
+[0x01020020] = 0x01020480   Reset           [in image]
+[0x01020024] = 0x00335cf4   Undef           [ELSEWHERE (relocated/ROM)]
+[0x01020028] = 0x00335b54   SWI/SVC         [ELSEWHERE (relocated/ROM)]
+[0x0102002c] = 0x00335c94   Prefetch Abort  [ELSEWHERE (relocated/ROM)]
+[0x01020030] = 0x00335cc4   Data Abort      [ELSEWHERE (relocated/ROM)]
+[0x01020034] = 0x00000000   (reserved)      [ELSEWHERE (relocated/ROM)]
+[0x01020038] = 0x00335bc8   IRQ             [ELSEWHERE (relocated/ROM)]
+[0x0102003c] = 0x00335c64   FIQ             [ELSEWHERE (relocated/ROM)]
