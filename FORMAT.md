@@ -178,6 +178,80 @@ Silex v2.1.5 (`SX-2000U2_v2.1.5.bin`): header `0x00–0x49`, records `0x4A`…, 
 ## Tooling
 
 [`fw_codec.py`](fw_codec.py) implements encode/decode, checksum recomputation,
-and a self-test (`python3 fw_codec.py selftest <image>`) that verifies
-round-trip identity, the ARM-vector sanity check, the checksum chain, and
-rejection of malformed images. It passes on both samples above.
+and a self-test (`python3 fw_codec.py selftest`) that verifies round-trip
+identity, the ARM-vector sanity check, the checksum chain, and rejection of
+malformed images. It passes on both samples above (run with no path, it tests
+the checked-in `F5L009_v1.2.0.bin` and `SX-2000U2_v2.1.5.bin` fixtures).
+
+Subcommands:
+
+| Command | Purpose |
+|---|---|
+| `decrypt <in> <out>` | de-obfuscate every record's data (container kept intact) |
+| `encrypt <in> <out>` | re-obfuscate (identical operation — XOR is symmetric) |
+| `recompute <in> <out>` | rebuild all checksums of an encrypted image after edits |
+| `unpack <image> <dir>` | extract to a flat image + manifest (see below) |
+| `pack <dir> <out>` | rebuild the container from a manifest + flat image |
+| `selftest [image ...]` | run the verification suite |
+
+`encrypt`/`decrypt`/`recompute` keep the record structure in place; they are the
+right tools for a targeted patch when you already know the byte you want to
+change. `unpack`/`pack` are the better workflow for editing the firmware as a
+whole.
+
+## Unpack / pack workflow
+
+`unpack` decrypts the records and lays them out at their load addresses into one
+flat **ARM image**, so you edit real code and strings instead of transport
+chunks:
+
+```sh
+python3 fw_codec.py unpack F5L009_v1.2.0.bin out_dir/
+#   -> out_dir/image.bin      decrypted flat image (base address 0x20000)
+#   -> out_dir/manifest.json  everything needed to rebuild the container
+#   ...edit out_dir/image.bin in place...
+python3 fw_codec.py pack out_dir/ rebuilt.bin
+```
+
+With an unedited image, `unpack` → `pack` reproduces the input **byte-for-byte**
+(verified on both samples).
+
+### `image.bin`
+
+The decrypted payload of every record, placed at `load_addr - base_addr`. The
+records tile this image; a few address gaps exist and read back as zero. Because
+each record carries a fixed load address and length, **edits must be
+length-preserving** — patch bytes in place; do not insert or delete. `pack`
+reads each record's bytes from the same `[addr, addr+length)` window, so
+changing the file's overall size has no effect and bytes in gap regions are
+ignored.
+
+### `manifest.json`
+
+Captures everything `pack` needs for an exact rebuild:
+
+| Key | Meaning |
+|---|---|
+| `device`, `version` | parsed from the header (informational) |
+| `image_file`, `image_size` | flat-image filename and byte size |
+| `base_addr` | lowest record load address (`0x20000`) |
+| `seed_checksum` | record 1's checksum (the chain seed, preserved on repack) |
+| `header_b64` | the **verbatim** file header, base64 — preserves every byte, including the unidentified `0x05` field |
+| `trailer_b64` | the verbatim `seq=0xFFFF` trailer header |
+| `records` | ordered list of `{seq, type, flags, addr_lo, length}` |
+
+### What `pack` does
+
+1. Writes the verbatim header from `header_b64`.
+2. For each record, reads `image.bin[addr-base : addr-base+length]`, re-applies
+   the per-record XOR key, and emits the record header (record 1 keeps
+   `seed_checksum`; other checksums are placeholders).
+3. Appends the verbatim trailer header plus four placeholder bytes.
+4. Calls the checksum rebuild so the per-record chain, trailer checksum, seed
+   echo, and global checksum are all correct.
+5. Decrypts its own output as a sanity check before writing.
+
+Preserving the header and trailer verbatim means repacking stays faithful even
+where this spec is incomplete (e.g. the `0x05` byte). `pack` raises if any
+record's window falls outside the flat image, catching a non-length-preserving
+edit.
