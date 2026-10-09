@@ -1,0 +1,3 @@
+# Raw vendor download: untrusted InstallShield installer + driver-CD zip.
+# The firmware image extracted from it is checked in as SX-2000U2_v2.1.5.bin.
+/SX-2000U2/
