@@ -305,6 +305,12 @@ def _selftest() -> None:
     # a failed transfer carries status 0xffff and no data
     status2, dd2 = parse_control_reply(bytes.fromhex("00010001ffff00000000"))
     assert status2 == STATUS_FAIL and dd2 == b"", (status2, dd2)
+
+    # bulk header layout (pybelkusb-faithful: field2 0x0003, devId<<8|ep_addr, ...)
+    bw = bulk_write(dev_id=5, ep_addr=0x02, payload=b"ABCD", seq=1)
+    assert bw.hex() == "80030001000305020201804000000000000441424344", bw.hex()
+    br = bulk_read(dev_id=5, ep_addr=0x81, length=512, seq=2)
+    assert br.hex() == "000300020003058101018040000000000200", br.hex()
     print("protocol selftest: OK")
 
 
@@ -359,19 +365,26 @@ def control_write(dev_id: int, bm_request_type: int, b_request: int,
     return hdr + payload
 
 
-def bulk_write(dev_id: int, endpoint: int, payload: bytes, seq: int = 0) -> bytes:
-    """Bulk-OUT: prefix 0x8003, body >HHBBHLH {0003,(devId<<8)|02,ep,01,8040,0,len}."""
-    hdr = struct.pack(">HHHBBHLH",
-                      0x8003, seq & 0xFFFF, 0x0003 if False else ((dev_id & 0xFF) << 8) | 0x02,
-                      endpoint & 0xFF, 0x01, 0x8040, 0, len(payload))
+def bulk_write(dev_id: int, ep_addr: int, payload: bytes, seq: int = 0) -> bytes:
+    """Bulk/interrupt OUT. `ep_addr` is the full USB endpoint address (bit7=0 for
+    OUT). Layout matches pybelkusb's working bulkWrite (18-byte header):
+      type=8003 seq 0003 [devId<<8 | ep_addr] [ep_num 01] 8040 len32 len16
+    """
+    hdr = struct.pack(">HHHHBBHLH",
+                      0x8003, seq & 0xFFFF, 0x0003,
+                      ((dev_id & 0xFF) << 8) | (ep_addr & 0xFF),
+                      ep_addr & 0x0F, 0x01, 0x8040, 0, len(payload))
     return hdr + payload
 
 
-def bulk_read(dev_id: int, endpoint: int, length: int, seq: int = 0) -> bytes:
-    """Bulk-IN: prefix 0x0003, direction field (devId<<8)|0x83. Reply: data after 10 bytes."""
-    return struct.pack(">HHHBBHLH",
-                       0x0003, seq & 0xFFFF, ((dev_id & 0xFF) << 8) | 0x83,
-                       endpoint & 0xFF, 0x01, 0x8040, 0, length)
+def bulk_read(dev_id: int, ep_addr: int, length: int, seq: int = 0) -> bytes:
+    """Bulk/interrupt IN. `ep_addr` is the full USB endpoint address (bit7=1 for
+    IN, e.g. 0x81). Reply is a 10-byte header + up to `length` data bytes
+    (parse_control_reply). Layout matches pybelkusb's bulkRead."""
+    return struct.pack(">HHHHBBHLH",
+                       0x0003, seq & 0xFFFF, 0x0003,
+                       ((dev_id & 0xFF) << 8) | (ep_addr & 0xFF),
+                       ep_addr & 0x0F, 0x01, 0x8040, 0, length)
 
 
 # A data-channel transfer reply has a 10-byte header, then `size` bytes of data.

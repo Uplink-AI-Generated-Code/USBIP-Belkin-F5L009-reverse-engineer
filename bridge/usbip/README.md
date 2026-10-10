@@ -35,7 +35,7 @@ usbip attach -r <server-host> -b 1-1   # imports the device
 | IMPORT → SXUPTP attach + descriptor read | **wired; drives the real attach** |
 | Control (ep0) SUBMIT → SXUPTP control transfer | **working live** |
 | End-to-end IMPORT + CMD_SUBMIT (GET_DESCRIPTOR) | **working live** — a Python USB/IP client round-tripped an 18-byte device descriptor through the full stack |
-| Bulk / interrupt endpoints | **stubbed** — return a stall (`-EPIPE`); see TODO in `backend.py` |
+| Bulk / interrupt endpoints | **working live** — a Mass-Storage Bulk-Only INQUIRY (CBW→data→CSW) round-tripped on the Corsair (bulk OUT 0x01 / IN 0x82), returning vendor `Corsair`, product `Voyager SliderX1`, CSW status 0 |
 | `usbip attach` from a real Linux client | not yet tried (no Linux client here); the wire protocol is validated by the Python client |
 
 ## Operational caveats (learned against hardware)
@@ -68,8 +68,8 @@ usbip attach -r <server-host> -b 1-1   # imports the device
 
 ## Next
 
-1. Confirm a live `usbip attach` returns the device and enumerates (needs a
-   power-cycled hub).
-2. Wire bulk/interrupt (`sx.bulk_read`/`bulk_write`) so data transfers work
-   (flash-drive storage, keyboard input).
-3. Reverse the clean slot-release so attach/detach cycles don't need a power-cycle.
+1. Try a real Linux `usbip attach` (the Python client validates the wire
+   protocol, but a kernel client mounting the flash drive is the real proof).
+2. Reverse the clean slot-release so attach/detach cycles don't need a reboot.
+3. Handle bulk transfers larger than 0xffff per request if needed (the builder's
+   length field is 16-bit; `bulk_in` already chunks requests).

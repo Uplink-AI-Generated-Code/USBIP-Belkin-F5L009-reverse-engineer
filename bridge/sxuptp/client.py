@@ -234,6 +234,56 @@ class SxuptpClient:
         reply = self.tcp.recv(4096)
         return p.parse_control_reply(reply)
 
+    def _recv_exact(self, n: int) -> bytes:
+        buf = b""
+        while len(buf) < n:
+            chunk = self.tcp.recv(n - len(buf))
+            if not chunk:
+                raise ConnectionError("peer closed during recv")
+            buf += chunk
+        return buf
+
+    def _recv_reply(self) -> tuple[int, bytes]:
+        """Read one framed transfer reply: 10-byte header + `size` data bytes."""
+        import struct
+        hdr = self._recv_exact(p.CTRL_REPLY_HEADER)
+        status = struct.unpack_from(">H", hdr, 4)[0]
+        size = struct.unpack_from(">H", hdr, 8)[0]
+        data = self._recv_exact(size) if size else b""
+        return status, data
+
+    def bulk_out(self, ep_addr: int, data: bytes) -> int:
+        """Bulk/interrupt OUT transfer -> status (0 = OK). ep_addr is a full USB
+        endpoint address (bit7=0). CONFIRMED path (pybelkusb bulk worked live)."""
+        if self.tcp is None or self.dev_id is None:
+            raise RuntimeError("not attached")
+        self.seq += 1
+        self.tcp.sendall(p.bulk_write(self.dev_id, ep_addr, data, seq=self.seq))
+        self.tcp.settimeout(self.timeout)
+        status, _ = self._recv_reply()
+        return status
+
+    def bulk_in(self, ep_addr: int, length: int) -> tuple[int, bytes]:
+        """Bulk/interrupt IN transfer -> (status, data). ep_addr has bit7=1 (IN).
+        Re-requests until `length` bytes arrive or a short/zero packet ends it."""
+        if self.tcp is None or self.dev_id is None:
+            raise RuntimeError("not attached")
+        out = b""
+        remaining = length
+        while remaining > 0:
+            chunk_req = min(remaining, 0xFFFF)
+            self.seq += 1
+            self.tcp.sendall(p.bulk_read(self.dev_id, ep_addr, chunk_req, seq=self.seq))
+            self.tcp.settimeout(self.timeout)
+            status, data = self._recv_reply()
+            if status != p.STATUS_OK:
+                return status, out
+            out += data
+            if len(data) < chunk_req:        # short packet / ZLP => transfer done
+                break
+            remaining -= len(data)
+        return p.STATUS_OK, out
+
     def find_dev_id(self, candidates: tuple[int, ...] = (1, 2, 3, 4, 5, 6, 7, 8, 0),
                     want_vid: int | None = None, want_pid: int | None = None,
                     exclude: tuple[int, ...] = ()) -> int:

@@ -116,10 +116,16 @@ class Device:
         ep_num = cmd.ep & 0x0F
         if ep_num == 0:
             return self._control(cmd)
-        # TODO(bulk/interrupt): map to sx.bulk_read/bulk_write once the bulk
-        # reply loop is confirmed live. For now, stall non-control endpoints so
-        # the host sees a clean error instead of hanging.
-        return EPIPE, b""
+        # bulk / interrupt: SXUPTP uses the same data-engine framing for both.
+        ep_addr = (ep_num | 0x80) if cmd.is_in else ep_num
+        try:
+            if cmd.is_in:
+                status, data = self.client.bulk_in(ep_addr, cmd.transfer_buffer_length)
+                return (0, data) if status == 0 else (EREMOTEIO, b"")
+            status = self.client.bulk_out(ep_addr, cmd.transfer_buffer)
+            return (0, b"") if status == 0 else (EREMOTEIO, b"")
+        except Exception:
+            return EPIPE, b""
 
     def _control(self, cmd: u.CmdSubmit) -> tuple[int, bytes]:
         bm, b_req, w_value, w_index, w_length = struct.unpack("<BBHHH", cmd.setup)
