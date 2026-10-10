@@ -93,7 +93,52 @@ never send these while probing; only `GET *` / `POLLING` are read-only.
 **Conclusion:** JCP has no "connect USB device" verb — device attach is handled
 by the separate **SXUPTPD** job path, not JCP.
 
-### Remaining blocker — attach / job allocation (SXUPTPD, not JCP)
+### Attach — IDENTIFIED (full connect flow)
+
+Device attach is the JCP command **`EXEC SCANNER CONNECT`** (release =
+**`EXEC SCANNER DISCONNECT`**); firmware logs `JCPD: Recv EXEC SCANNER CONNECT`.
+("Scanner" is Silex's legacy term for a USB virtual connection.) USB ports are
+named **`scn1`, `scn2`, …** (default `"scn1"`).
+
+Handlers: the JCP command → `sub_002FA478` (parse) → `sub_00302C58` (open). The
+request body (parsed by `sub_002FA478`) carries, roughly:
+
+```
+u8   flag       (default 1)
+u8   mac_len    (default 6)
+u8[6] client_MAC
+u32  client_IP        (big-endian)
+char port_name[]      ASCII, e.g. "scn1" / "scn2" (<=16, default "scn1")
+```
+
+`sub_00302C58` then: finds/allocates a job keyed by `port_name` (`job+0x10`),
+stores `client_IP`→`job+0x28`, `client_port`→`job+0x2c`, `client_MAC`→`job+0x30`,
+resolves the USB device by name (`sub_00306D1C`), and sets job state **1**.
+
+### Full connect sequence (device rescue path)
+
+1. **Discover** — JCP `cmd4/0x9506` → device identity (WORKING).
+   (Full per-port device list is via JCP `GET ENUM_DATA`.)
+2. **Connect** — JCP `EXEC SCANNER CONNECT` with `port_name` (`scn1`/`scn2`) and
+   the client's IP/port/MAC. Device allocates a job (state 1 → **2 OPEN_WAIT**)
+   and UDP-replies.
+3. **TCP attach** — client connects TCP 19540; the accept handler
+   (`sub_00302948`) matches the job by client IP/port → state **4 (active)**.
+4. **USB I/O** — the 24-byte SXUPTP data-channel messages (control / data
+   categories) carry URBs both ways.
+5. **Release** — JCP `EXEC SCANNER DISCONNECT`.
+
+This maps cleanly onto a USB/IP exporter: `usbip attach` → CONNECT + TCP + the
+device descriptors; URBs ⇄ SXUPTP type-1..4 messages; detach → DISCONNECT.
+
+### Remaining detail
+
+The exact byte offsets within the `EXEC SCANNER CONNECT` body and the JCP
+request framing (how the command name `req[4:]` and body are laid out on the
+wire) still need pinning for a first live attempt; most of the body is decoded
+above. A live attempt is reversible (DISCONNECT) and uses the device's normal
+function, but is state-changing, so it should be crafted carefully (and paired
+with a DISCONNECT) rather than fuzzed.
 
 Discovery works, but the command that moves a job to `OPEN_WAIT` (so TCP 19540
 accepts the data channel) is still unidentified — it is likely a JCP **set** on a
