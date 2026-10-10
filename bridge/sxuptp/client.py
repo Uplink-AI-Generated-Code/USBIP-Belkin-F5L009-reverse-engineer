@@ -296,6 +296,40 @@ class SxuptpClient:
                 break
         return p.STATUS_OK, out
 
+    def interrupt_in(self, ep_addr: int, length: int, interval: int = 10,
+                     timeout: float | None = None) -> tuple[int, bytes]:
+        """Interrupt IN transfer -> (status, report). Uses type 0x0002 (category
+        2), which is what actually polls an interrupt endpoint — `bulk_in`
+        (category 3) hits the bulk/queue path and never delivers HID reports.
+
+        The device holds the request and replies when a report is available (a
+        key event), so this BLOCKS like a real interrupt URB; `timeout` bounds the
+        wait (None = self.timeout). Per request the device may send a short ACK
+        (6 bytes) then the report; we skip ACKs and return the first report.
+        """
+        if self.tcp is None or self.dev_id is None:
+            raise RuntimeError("not attached")
+        self.seq += 1
+        self.tcp.sendall(p.interrupt_read(self.dev_id, ep_addr, length, interval,
+                                          seq=self.seq))
+        self.tcp.settimeout(self.timeout if timeout is None else timeout)
+        buf = b""
+        while True:
+            # a report is a 10-byte header (type,seq,status,_,size) + `size` bytes;
+            # a bare 6-byte (type,seq,0000) is an ACK to skip.
+            if len(buf) >= 10:
+                size = struct.unpack_from(">H", buf, 8)[0]
+                if size and len(buf) >= 10 + size:
+                    return struct.unpack_from(">H", buf, 4)[0], buf[10:10 + size]
+            if len(buf) >= 6 and struct.unpack_from(">H", buf, 4)[0] == 0 and \
+                    (len(buf) < 10 or struct.unpack_from(">H", buf, 8)[0] == 0):
+                buf = buf[6:]                # drop a 6-byte ACK
+                continue
+            chunk = self.tcp.recv(512)
+            if not chunk:
+                raise ConnectionError("peer closed during interrupt_in")
+            buf += chunk
+
     def find_dev_id(self, candidates: tuple[int, ...] = (1, 2, 3, 4, 5, 6, 7, 8, 0),
                     want_vid: int | None = None, want_pid: int | None = None,
                     exclude: tuple[int, ...] = ()) -> int:

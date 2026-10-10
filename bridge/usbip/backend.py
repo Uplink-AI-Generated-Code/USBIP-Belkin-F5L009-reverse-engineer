@@ -10,7 +10,12 @@ bulk reply loop is exercised against hardware — see TODO below.
 """
 from __future__ import annotations
 
+import socket
 import struct
+
+# How long an interrupt-IN read waits for a report before returning "no data"
+# (idle keyboard blocks until a key event). Bounds detach latency.
+INTR_WAIT = 20.0
 
 from ..sxuptp.client import SxuptpClient
 from ..sxuptp import protocol as sx
@@ -82,6 +87,8 @@ class Device:
         total = (cfg[2] | (cfg[3] << 8)) if len(cfg) >= 4 else 9
         interfaces: list[tuple[int, int, int]] = []
         max_ep_mps = 0
+        # endpoint address -> (transfer_type, bInterval); type 3 = interrupt
+        self.ep_info: dict[int, tuple[int, int]] = {}
         if total > 9:
             full = c.control_transfer(sx.Setup.get_descriptor(desc_type=2, desc_index=0,
                                                              length=total))
@@ -93,7 +100,11 @@ class Device:
                 if btype == 0x04 and i + 8 < len(full):      # INTERFACE descriptor
                     interfaces.append((full[i + 5], full[i + 6], full[i + 7]))
                 elif btype == 0x05 and i + 6 < len(full):    # ENDPOINT descriptor
+                    addr = full[i + 2]
+                    attr = full[i + 3] & 0x03
                     mps = (full[i + 4] | (full[i + 5] << 8)) & 0x07FF
+                    interval = full[i + 6]
+                    self.ep_info[addr] = (attr, interval)
                     max_ep_mps = max(max_ep_mps, mps)
                 i += blen
 
@@ -134,13 +145,23 @@ class Device:
         ep_num = cmd.ep & 0x0F
         if ep_num == 0:
             return self._control(cmd)
-        # bulk / interrupt: SXUPTP uses the same data-engine framing for both.
         ep_addr = (ep_num | 0x80) if cmd.is_in else ep_num
+        attr, interval = getattr(self, "ep_info", {}).get(ep_addr, (2, 10))
         try:
-            if cmd.is_in:
+            if attr == 3:                    # interrupt endpoint -> type 0x0002 path
+                if not cmd.is_in:
+                    return EPIPE, b""        # interrupt OUT: unsupported for now
+                try:
+                    status, data = self.client.interrupt_in(
+                        ep_addr, cmd.transfer_buffer_length or 8, interval or 10,
+                        timeout=INTR_WAIT)
+                except socket.timeout:
+                    return 0, b""            # idle interval, no report -> resubmit
+                return (0, data) if status == 0 else (EREMOTEIO, b"")
+            if cmd.is_in:                    # bulk IN
                 status, data = self.client.bulk_in(ep_addr, cmd.transfer_buffer_length)
                 return (0, data) if status == 0 else (EREMOTEIO, b"")
-            status = self.client.bulk_out(ep_addr, cmd.transfer_buffer)
+            status = self.client.bulk_out(ep_addr, cmd.transfer_buffer)  # bulk OUT
             return (0, b"") if status == 0 else (EREMOTEIO, b"")
         except Exception:
             return EPIPE, b""

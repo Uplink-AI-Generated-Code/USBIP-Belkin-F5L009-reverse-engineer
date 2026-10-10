@@ -377,6 +377,23 @@ def bulk_write(dev_id: int, ep_addr: int, payload: bytes, seq: int = 0) -> bytes
     return hdr + payload
 
 
+def interrupt_read(dev_id: int, ep_addr: int, length: int, interval: int = 10,
+                   seq: int = 0) -> bytes:
+    """Interrupt IN — **type 0x0002 (category 2), NOT 0x0003 (bulk)**. This is the
+    distinction that makes HID input flow: a category-3 request to an interrupt
+    endpoint hits the bulk/queue path and never polls. Layout decoded from the
+    official driver capture (Packet_Dumps), e.g. ep 0x81 len 8 interval 0x0a:
+        0002 <seq> 0002 <devId<<8|ep> 02 01 <0x8000|len> <interval> 0000 <len>
+    The device replies (10-byte header + `len` report bytes) when a report is
+    available — resubmit to keep polling, like a USB interrupt URB.
+    """
+    return struct.pack(">HHHHBBHHHH",
+                       0x0002, seq & 0xFFFF, 0x0002,
+                       ((dev_id & 0xFF) << 8) | (ep_addr & 0xFF),
+                       0x02, 0x01, 0x8000 | (length & 0x7FFF),
+                       interval & 0xFFFF, 0x0000, length & 0xFFFF)
+
+
 def bulk_read(dev_id: int, ep_addr: int, length: int, seq: int = 0) -> bytes:
     """Bulk/interrupt IN. `ep_addr` is the full USB endpoint address (bit7=1 for
     IN, e.g. 0x81). Reply is a 10-byte header + up to `length` data bytes

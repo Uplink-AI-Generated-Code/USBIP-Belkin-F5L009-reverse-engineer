@@ -27,36 +27,55 @@ PORT = 19540
 
 
 # ---- pcap container -------------------------------------------------------
-def read_pcap(path):
-    with open(path, "rb") as f:
-        blob = f.read()
-    magic = blob[:4]
-    if magic in (b"\xa1\xb2\xc3\xd4", b"\xa1\xb2\x3c\x4d"):
-        en = ">"; nano = magic == b"\xa1\xb2\x3c\x4d"
-    elif magic in (b"\xd4\xc3\xb2\xa1", b"\x4d\x3c\xb2\xa1"):
-        en = "<"; nano = magic == b"\x4d\x3c\xb2\xa1"
-    elif magic[:4] == b"\x0a\x0d\x0d\x0a":
-        sys.exit("This looks like pcapng. Re-save as classic pcap "
-                 "(Wireshark: Export/Save As -> 'Wireshark/tcpdump/libpcap').")
-    else:
-        sys.exit(f"Not a pcap file (magic {magic.hex()}).")
-    linktype = struct.unpack_from(en + "I", blob, 20)[0]
-    off = 24
-    while off + 16 <= len(blob):
-        _ts, _tu, incl, _orig = struct.unpack_from(en + "IIII", blob, off)
-        off += 16
-        yield blob[off:off + incl]
-        off += incl
-    return linktype
+def _read_pcapng(blob):
+    """Parse pcapng -> (linktype, [packet_bytes]). Handles SHB/IDB/EPB/SPB."""
+    en = "<"
+    linktype = 1
+    frames = []
+    off = 0
+    snaplen = 0x40000
+    while off + 12 <= len(blob):
+        btype = struct.unpack_from("<I", blob, off)[0]
+        if btype == 0x0A0D0D0A:                      # Section Header Block
+            bom = struct.unpack_from("<I", blob, off + 8)[0]
+            en = "<" if bom == 0x1A2B3C4D else ">"
+        blen = struct.unpack_from(en + "I", blob, off + 4)[0]
+        if blen < 12 or off + blen > len(blob):
+            break
+        if btype == 0x00000001:                      # Interface Description Block
+            linktype = struct.unpack_from(en + "H", blob, off + 8)[0]
+            snaplen = struct.unpack_from(en + "I", blob, off + 12)[0]
+        elif btype == 0x00000006:                    # Enhanced Packet Block
+            caplen = struct.unpack_from(en + "I", blob, off + 20)[0]
+            frames.append(blob[off + 28:off + 28 + caplen])
+        elif btype == 0x00000003:                    # Simple Packet Block
+            origlen = struct.unpack_from(en + "I", blob, off + 8)[0]
+            frames.append(blob[off + 12:off + 12 + min(origlen, snaplen)])
+        off += blen
+    return linktype, frames
 
 
 def read_pcap_with_linktype(path):
     with open(path, "rb") as f:
-        head = f.read(24)
-    magic = head[:4]
-    en = ">" if magic[0] == 0xA1 else "<"
-    linktype = struct.unpack_from(en + "I", head, 20)[0]
-    return linktype, list(read_pcap(path))
+        blob = f.read()
+    magic = blob[:4]
+    if magic == b"\x0a\x0d\x0d\x0a":
+        return _read_pcapng(blob)
+    if magic in (b"\xa1\xb2\xc3\xd4", b"\xa1\xb2\x3c\x4d"):
+        en = ">"
+    elif magic in (b"\xd4\xc3\xb2\xa1", b"\x4d\x3c\xb2\xa1"):
+        en = "<"
+    else:
+        sys.exit(f"Not a pcap/pcapng file (magic {magic.hex()}).")
+    linktype = struct.unpack_from(en + "I", blob, 20)[0]
+    frames = []
+    off = 24
+    while off + 16 <= len(blob):
+        _ts, _tu, incl, _orig = struct.unpack_from(en + "IIII", blob, off)
+        off += 16
+        frames.append(blob[off:off + incl])
+        off += incl
+    return linktype, frames
 
 
 # ---- L2/L3/L4 -------------------------------------------------------------
