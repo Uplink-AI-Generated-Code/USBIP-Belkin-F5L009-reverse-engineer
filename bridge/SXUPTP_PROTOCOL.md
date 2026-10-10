@@ -411,6 +411,33 @@ the hub's gateway (`192.168.2.1`).
 Implemented in `sxuptp.protocol`: `control_read` / `control_write` / `bulk_read`
 / `bulk_write`.
 
+## Live attach with the faithful (pybelkusb) connect — blocked by the gateway IP
+
+Replicating pybelkusb's exact two-step connect (prefix `00 01 00 01`,
+`EXEC SCANNER CONNECT:` with colon, `\0LT\0` + padding + `02`, then the
+`00 03 00 01` packet) against the live hub:
+
+- cmd1 returns `OK`; cmd3 returns an empty `0003…`; TCP attaches fine.
+- **No devId announcement** arrives on the `:19540` socket (pybelkusb reads the
+  devId from `byte[3]` of that reply).
+- The control read returns `0001 <seq> ffff 0000 0000` for every devId tried —
+  the device *processes* it (it echoes our sequence number) but the USB transfer
+  errors (`(Ctrl)Trans Err`).
+
+This matches pybelkusb's note that the connection **only worked from a client IP
+different from the hub's own gateway**. Here the Mac is the hub's Internet-Sharing
+gateway/DHCP server (`192.168.2.1`), i.e. we are connecting *as* the gateway —
+exactly the case that fails. The Mac has no other `192.168.2.x` address and an
+alias needs root, so the next step is operator action:
+
+```
+sudo ifconfig bridge100 alias 192.168.2.50 255.255.255.0
+```
+
+Then re-run the faithful test with client IP `192.168.2.50` (both as the body IP
+and the socket source). If pybelkusb's observation holds, the devId announcement
+should appear and the control transfer should return the device descriptor.
+
 ## Transport map (Milestone 1 — confirmed)
 
 SXUPTP uses **port 19540** (`0x4C54`) on **both TCP and UDP** — matching the IANA
