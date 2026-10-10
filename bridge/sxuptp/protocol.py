@@ -75,16 +75,26 @@ def parse_device_list(buf: bytes) -> list[dict]:
     return out
 
 
-def pack_scanner_connect(port_name: str, client_ip: str, client_mac: bytes) -> bytes:
+def pack_scanner_connect(port_name: str, client_ip: str, device_mac: bytes,
+                         command: int = 1) -> bytes:
     """
-    EXEC SCANNER CONNECT request (body layout decoded from sub_002FA478).
-    NOTE: tested live but does not yet allocate a job — the exact port_name /
-    pre-check parameter still needs confirming. Reversible via DISCONNECT.
+    EXEC SCANNER CONNECT request. CONFIRMED live: returns "OK" and creates a job.
+
+    - command=1 selects the ACTION path in the EXEC trampoline (cmd=3 is the
+      field-copy/response path and no-ops the action).
+    - body = {flag=1, mac_len=6, DEVICE_MAC(6), client_IP(4), port_name "devNN"}.
+      The MAC must be the DEVICE's own MAC (a target-selector pre-check,
+      sub_002FA0A0); port_name is a `devNN` from GET USB_DEVICE_LIST.
+
+    NOTE: this creates a job (OPEN_WAIT) but the OPEN_WAIT->active handshake
+    (UDP grant callback + TCP match) is not yet completed by this client, and a
+    created-but-unattached job stays reserved (NG to new CONNECTs) until it times
+    out or the device is power-cycled. See ../SXUPTP_PROTOCOL.md.
     """
     import socket as _s
-    body = bytes([1, len(client_mac)]) + client_mac + _s.inet_aton(client_ip) + \
+    body = bytes([1, len(device_mac)]) + device_mac + _s.inet_aton(client_ip) + \
         port_name.encode("latin1") + b"\x00"
-    return pack_jcp(JCP_SCANNER_CONNECT, body)
+    return pack_jcp(JCP_SCANNER_CONNECT, body, command=command)
 
 
 def pack_identify() -> bytes:

@@ -199,6 +199,24 @@ match by client IP → active; release = `EXEC SCANNER DISCONNECT`). The one
 remaining unknown is the **exact misp-template wire layout** of the
 `EXEC SCANNER CONNECT` request, which is client-defined and ARM-engine-driven.
 
+### Attach — live progress (CONNECT works)
+
+Static insight that unlocked it: the EXEC trampoline `sub_0032FCC8` routes on
+`ntohs(req[0:2])` — **`1` = action path** (calls the handler `sub_002FA478`),
+`3` = field-copy/response path. Sending `EXEC SCANNER CONNECT` with **`cmd=1`**
+and body `{flag=1, mac_len=6, DEVICE_MAC, client_IP, "devNN"}` returns **`OK`**
+and **creates a job** (CONFIRMED live). The compact body lands directly (the
+pre-check `sub_002FA0A0` MAC compare passes), so no template is needed for the
+*request* after all — `cmd=1` was the missing piece.
+
+**Remaining (stateful handshake):** a created job sits in `OPEN_WAIT`; the
+`state 1→2` pump sends a UDP *grant* and then a client TCP connect must match by
+peer IP. In testing the job did not advance to an attachable state and the TCP
+connect still RST'd; the job's callback port is left 0 by `sub_002FA478`, so the
+grant routing / exact TCP-match timing is the open issue. A created-but-
+unattached job stays **reserved** (new CONNECTs return `NG`) until it times out
+or the device is power-cycled — so test attach sparingly.
+
 ### How to finish attach (what a capture must show)
 
 Pure static RE has reached its efficient limit here. A single capture of the
