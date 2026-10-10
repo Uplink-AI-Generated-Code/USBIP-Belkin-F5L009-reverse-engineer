@@ -254,10 +254,21 @@ The full attach path now works against the real device:
 
 Implemented as `SxuptpClient.attach(port_name, device_mac, client_ip)`.
 
-**Operational notes:** the OPEN_WAIT slot reserves the device; an un-matched job
-times out but the slot then stays `NG` until the device is power-cycled, so
-practically there's ~one clean attach attempt per power-cycle. The pump window is
+**Operational notes:** the OPEN_WAIT slot reserves the device; the pump window is
 short (~0.5 s), hence the TCP-connect retry loop.
+
+**Clean slot release — RST, not FIN (RESOLVED).** A matched job (state 4) is only
+freed when the connection state machine (`sub_00302FB0`, a jump table on
+`job[4]`) reaches **state 3**, whose handler (`0x303138`) closes the connection
+and calls **Free job** (`sub_00302924`, which zeroes `job[0]`, the in-use marker
+the OPEN_WAIT matcher checks). The state machine sets `job[4]=3` **only when its
+`recv()` returns an error** (`0x302fea`: `cmp r4,#0; bge …; else job[4]=3`); a
+graceful FIN (recv==0) does not, nor does `EXEC SCANNER DISCONNECT` by itself —
+either leaves the slot `NG`. So the client closes the TCP data channel with an
+**abortive RST** (`SO_LINGER` 0): recv errors → state 3 → Free job, and the slot
+is reusable in ~1 s. Verified live: three imports back-to-back with no reboot.
+Jump table (deref'd at `0x3031d4`): state0 `0x302ff4`, 1 `0x3030c4`, 2 `0x303102`,
+3 `0x303138` (teardown+Free job), 4 `0x30300a` (active recv/parse).
 
 **Control transfers are asynchronous.** In the parser's control path
 (`sub_0030481C` sl==1), after `sub_0031EF2C` submits the USB request it stores a

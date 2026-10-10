@@ -1,15 +1,15 @@
 """
 SXUPTP probe client.
 
-Implements the reverse-engineered handshake far enough to discover a device,
-open a TCP session, and issue a control transfer. CONFIRMED pieces (ports,
-framing, control SETUP) are solid; the discovery-reply parsing and the attach
-request body are INFERRED and will likely need adjustment against a real device
-(see ../SXUPTP_PROTOCOL.md). Nothing here has been tested against hardware yet.
+Implements the reverse-engineered SXUPTP handshake and data channel: discovery,
+device list, attach (two-step CONNECT + OPEN_WAIT match), control and bulk/
+interrupt transfers, and clean slot release (RST close). Confirmed live against a
+Belkin F5L009 hub (see ../SXUPTP_PROTOCOL.md).
 """
 from __future__ import annotations
 
 import socket
+import struct
 import time
 
 from . import protocol as p
@@ -337,9 +337,19 @@ class SxuptpClient:
         return out
 
     def disconnect(self) -> None:
-        """Free the device slot (EXEC SCANNER DISCONNECT) and close the channel.
-        Sockets passed in by the caller (shared session/grant sockets) are left
-        open; only sockets this client created are closed."""
+        """Release the device slot and close the channel.
+
+        The slot is freed by closing the TCP data channel with an ABORTIVE RST
+        (SO_LINGER 0), not a graceful FIN: the firmware's connection state machine
+        sets the job to state 3 only when its recv() returns an ERROR, and state 3
+        is the teardown that calls Free job (sub_00302924). A clean FIN leaves the
+        job reserved (NG on reconnect) until the hub reboots; an RST frees it in
+        ~1s, enabling attach/detach cycles with no reboot. (Verified live.)
+
+        The EXEC SCANNER DISCONNECT datagram is still sent (it is acked and is the
+        documented teardown), but the RST is what actually releases the slot.
+        Caller-owned sockets (shared session/grant) are left open.
+        """
         if getattr(self, "_udp", None):
             try:
                 self._udp.send(p.pack_disconnect(self._mac, self._client_ip, self._node))
@@ -352,6 +362,12 @@ class SxuptpClient:
 
     def close(self) -> None:
         if self.tcp:
+            try:
+                # abortive close -> RST, so the hub frees the job (see disconnect)
+                self.tcp.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER,
+                                    struct.pack("ii", 1, 0))
+            except OSError:
+                pass
             self.tcp.close()
             self.tcp = None
         if getattr(self, "_bc", None):

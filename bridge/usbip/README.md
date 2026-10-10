@@ -48,12 +48,15 @@ usbip attach -r <server-host> -b 1-1   # imports the device
   `SxuptpClient.attach(..., udp=, bc=)`. A CONNECT from a different port than the
   list never advances to OPEN_WAIT (symptom: `could not match the OPEN_WAIT
   window`). This is why the exporter holds one session for its whole life.
-- **Slot reservation.** A CONNECT reserves the device slot. `EXEC SCANNER
-  DISCONNECT` is acknowledged (`OK`) but does **not** free it — a new CONNECT
-  returns `NG` until the hub reboots. The hub can be rebooted over HTTP (empty-
-  password login at `/en/login/login.htm`, then GET `/en/reset/exec.htm`), which
-  takes ~10s. One attach session per reboot for now; clean release is still to
-  reverse.
+- **Slot release (resolved).** A CONNECT reserves the device slot. `EXEC SCANNER
+  DISCONNECT` alone does not free it, and a graceful TCP FIN does not either —
+  the firmware's connection state machine only frees the job (state 3 ->
+  `sub_00302924` "Free job") when its `recv()` returns an **error**. So the
+  client closes the TCP data channel with an **abortive RST** (`SO_LINGER` 0),
+  which releases the slot in ~1s. Attach/detach now cycles with **no reboot**
+  (verified: three imports back-to-back). The HTTP reboot (empty-password login
+  at `/en/login/login.htm`, then GET `/en/reset/exec.htm`) is now only needed if
+  a client dies without RST-closing.
 - **devId vs node (resolved).** The SXUPTP transfer handle (devId) is a USB
   device address, not the `devNN` index, and the hub does not announce it (the
   OPEN_WAIT grant never arrives on `:19540` here). It is now resolved by matching
@@ -70,6 +73,5 @@ usbip attach -r <server-host> -b 1-1   # imports the device
 
 1. Try a real Linux `usbip attach` (the Python client validates the wire
    protocol, but a kernel client mounting the flash drive is the real proof).
-2. Reverse the clean slot-release so attach/detach cycles don't need a reboot.
-3. Handle bulk transfers larger than 0xffff per request if needed (the builder's
+2. Handle bulk transfers larger than 0xffff per request if needed (the builder's
    length field is 16-bit; `bulk_in` already chunks requests).
