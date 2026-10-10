@@ -185,12 +185,34 @@ parameters at **`req[0x54]` and `req[0x56]`**, and copies templated fields by
 immediately after the command name. My compact packet put those bytes in the
 wrong place, so the pre-check/parse silently no-op'd.
 
-**Status:** attach is fully understood *mechanically* (CONNECT → job OPEN_WAIT →
-TCP match → active; device MAC + `devNN` name required), but the exact **misp
-template 39 field layout** is the one remaining unknown. Decoding it statically
-means reversing the template descriptor table; a **single capture of the real
-SX Virtual Link client performing a connect** would give the byte layout
-directly. This is the efficient unlock and the recommended next step.
+The template engine itself is **ARM-coded**, reached through the Thumb→ARM
+veneer table at `0x339FB8` (`bx pc; mov r8,r8`), and the field positions/lengths
+are supplied **by the request** (the client's template), not a fixed firmware
+descriptor. So the CONNECT packet is a client-defined templated structure; the
+firmware places the `{flag, mac_len=6, device_MAC, client_IP, devNN}` body at the
+offsets the client's descriptors specify, and `sub_002FA478` reads it from the
+assembled buffer (flag@0, MAC@2, IP@8, name@12).
+
+**Status — attach:** fully understood *mechanically* and in its requirements
+(device MAC + a `devNN` port name + client IP; CONNECT → job OPEN_WAIT → TCP
+match by client IP → active; release = `EXEC SCANNER DISCONNECT`). The one
+remaining unknown is the **exact misp-template wire layout** of the
+`EXEC SCANNER CONNECT` request, which is client-defined and ARM-engine-driven.
+
+### How to finish attach (what a capture must show)
+
+Pure static RE has reached its efficient limit here. A single capture of the
+real **SX Virtual Link** client connecting one device (UDP 19540) yields the
+whole packet. From the capture we need:
+
+1. the full `EXEC SCANNER CONNECT` request bytes (to read the template header +
+   field descriptors around offsets `0x54`/`0x56` and where the body lands);
+2. the device's UDP reply (the OPEN_WAIT grant);
+3. the first bytes the client sends on the TCP 19540 data channel after connect.
+
+With those three, the remaining codec work is small — everything else
+(discovery, enumeration, data-channel framing, control SETUP, disconnect) is
+already decoded and, for discovery/enumeration, confirmed working live.
 
 ### Remaining detail
 
