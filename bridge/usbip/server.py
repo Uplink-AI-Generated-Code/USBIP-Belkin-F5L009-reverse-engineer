@@ -28,18 +28,53 @@ class Hub:
     def __init__(self, host: str, client_ip: str):
         self.host = host
         self.client_ip = client_ip
+        self.attach_lock = threading.Lock()
+
+        # Two persistent sockets for the server's whole life (sharing them is the
+        # only arrangement that attaches reliably — see sxuptp.client.attach):
+        #   _grant : bound (client_ip, 19540) — receives the OPEN_WAIT grant.
+        #   _session: ephemeral, connected to the hub — issues GET USB_DEVICE_LIST
+        #             AND every CONNECT, so they share one source port (the hub
+        #             keys the session to it).
+        self._grant = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self._grant.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._grant.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        self._grant.bind((client_ip, 19540))
+        self._session = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self._session.bind((client_ip, 0))
+        self._session.connect((host, 19540))
+        self._session.settimeout(2.0)
+
         devs = SxuptpClient.discover(target=host)
         if not devs:
             raise RuntimeError(f"no SXUPTP hub answered discovery at {host}")
         self.mac = bytes(int(x, 16) for x in devs[0]["mac"].split(":"))
         time.sleep(1.0)   # the hub drops a device-list query issued too soon after discovery
-        listed = SxuptpClient.list_devices(host, src=client_ip, retries=4)
+        listed = self._list_on_session(retries=4)
         self.devices: dict[str, Device] = {}
         for i, d in enumerate(listed):
             busid = f"1-{i + 1}"
             self.devices[busid] = Device(host, client_ip, self.mac, d["port"],
-                                         busid, busnum=1, devnum=i + 1)
+                                         busid, busnum=1, devnum=i + 1,
+                                         udp=self._session, bc=self._grant,
+                                         lock=self.attach_lock)
         self.names = {busid: d["device"] for busid, d in zip(self.devices, listed)}
+
+    def _list_on_session(self, retries: int = 4) -> list:
+        """GET USB_DEVICE_LIST on the shared session socket (same source port the
+        CONNECTs use)."""
+        from ..sxuptp import protocol as sx
+        req = b"\x00\x01\x00\x01GET USB_DEVICE_LIST" + b"\0" * 0x4F + b"\x02\x00"
+        for _ in range(max(1, retries)):
+            try:
+                self._session.send(req)
+                data = self._session.recv(8192)
+                devs = sx.parse_device_list(data)
+                if devs:
+                    return devs
+            except socket.timeout:
+                pass
+        return []
 
     def devlist(self) -> list[u.UsbipDevice]:
         """Lightweight advertisement (no attach): busids + product name. idVendor/

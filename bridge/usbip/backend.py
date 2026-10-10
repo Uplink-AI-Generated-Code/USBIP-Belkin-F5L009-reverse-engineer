@@ -25,7 +25,8 @@ class Device:
     """One exported hub device: a busid <-> (SXUPTP node, host) pair."""
 
     def __init__(self, host: str, client_ip: str, device_mac: bytes,
-                 node: str, busid: str, busnum: int, devnum: int):
+                 node: str, busid: str, busnum: int, devnum: int,
+                 udp=None, bc=None, lock=None):
         self.host = host
         self.client_ip = client_ip
         self.device_mac = device_mac
@@ -33,6 +34,9 @@ class Device:
         self.busid = busid
         self.busnum = busnum
         self.devnum = devnum
+        self._udp = udp        # shared persistent session socket (list + connect)
+        self._bc = bc          # shared persistent grant socket (client_ip:19540)
+        self._lock = lock      # serialize attaches across the shared session socket
         self.client: SxuptpClient | None = None
         self.info: u.UsbipDevice | None = None
 
@@ -41,8 +45,15 @@ class Device:
         """Open the SXUPTP channel and read enough descriptors to describe the
         device to USB/IP. Returns the populated UsbipDevice (also cached)."""
         c = SxuptpClient(self.host)
-        c.attach(self.node, self.device_mac, self.client_ip)
-        c.find_dev_id()                       # resolve the transfer handle
+        if self._lock is not None:
+            self._lock.acquire()
+        try:
+            c.attach(self.node, self.device_mac, self.client_ip,
+                     udp=self._udp, bc=self._bc)
+            c.find_dev_id()                   # resolve the transfer handle
+        finally:
+            if self._lock is not None:
+                self._lock.release()
         self.client = c
 
         dd = c.control_transfer(sx.Setup.get_descriptor(desc_type=1, desc_index=0,

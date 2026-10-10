@@ -65,12 +65,16 @@ class SxuptpClient:
         `src` binds the source IP (use a non-gateway alias for consistency with
         attach). Retries once because the hub occasionally drops the first reply
         right after a discovery round.
+
+        IMPORTANT: bind an EPHEMERAL source port (src, 0), like the vendor driver
+        / pybelkusb. Binding the well-known port 19540 here poisons a subsequent
+        CONNECT in the same process (the attach then never matches OPEN_WAIT).
         """
         for _ in range(max(1, retries)):
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             try:
-                s.bind((src, port))   # reply comes to the well-known port
+                s.bind((src, 0))      # ephemeral; the reply returns to this port
             except OSError:
                 pass
             s.settimeout(timeout)
@@ -113,7 +117,8 @@ class SxuptpClient:
 
     # --- session (TCP 19540) --------------------------------------------
     def attach(self, port_name: str, device_mac: bytes, client_ip: str,
-               window: float = 5.0) -> int | None:
+               window: float = 5.0, udp: socket.socket | None = None,
+               bc: socket.socket | None = None) -> int | None:
         """
         Claim a device and open the TCP data channel. CONFIRMED live (first real
         USB transfer obtained 2026-10-10).
@@ -126,11 +131,22 @@ class SxuptpClient:
              OPEN_WAIT window is brief, so we retry the connect across `window`.
 
         IMPORTANT: `client_ip` must NOT be the hub's network gateway. From the
-        gateway IP the device replies "NG"; a non-gateway client IP is required
-        (documented by pybelkusb and confirmed here). `device_mac` is the hub's
-        MAC (from discovery). Returns the devId if the announcement was captured,
-        else None (use find_dev_id() to sweep). Leaves self.tcp connected and
-        records the session for disconnect().
+        gateway IP the device replies "NG"; a non-gateway client IP is required.
+
+        CRITICAL socket rules (learned the hard way against hardware):
+          * The CONNECT must be sent from the SAME UDP socket (same source port)
+            that issued GET USB_DEVICE_LIST. The hub keys the session to
+            (client_ip, source_port); a CONNECT from a different port never
+            advances to OPEN_WAIT. Pass that socket as `udp` (the server reuses
+            one persistent session socket for the device list and every attach).
+          * A socket MUST stay bound on (client_ip, 19540) through the connect —
+            the device sends the OPEN_WAIT grant / devId there. Pass it as `bc`.
+        When `udp`/`bc` are omitted this method creates (and later closes) its
+        own, which is correct only when no prior GET USB_DEVICE_LIST was sent
+        from another socket in this process.
+
+        `device_mac` is the hub's MAC (from discovery). Returns the devId if the
+        announcement was captured, else None (use find_dev_id() to sweep).
         """
         import time
         self._node = port_name.encode("latin1") if isinstance(port_name, str) else port_name
@@ -139,22 +155,28 @@ class SxuptpClient:
         self.seq = 0
         self.dev_id: int | None = None
 
-        # capture socket on ('', port) so the devId announcement arrives (on BSD a
-        # socket bound to a specific unicast IP would drop a broadcast).
-        cap = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        cap.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        cap.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-        try:
-            cap.bind(("", self.port))
-        except OSError:
-            cap = None
-        if cap:
-            cap.settimeout(0.1)
+        self._owns_bc = bc is None
+        if bc is None:
+            bc = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            bc.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            bc.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            try:
+                bc.bind((client_ip, self.port))
+            except OSError:
+                bc = None
+                self._owns_bc = False
+        self._bc = bc
 
-        self._udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self._udp.bind((client_ip, 0))
-        self._udp.connect((self.host, self.port))
-        self._udp.settimeout(1.5)
+        self._owns_udp = udp is None
+        if udp is None:
+            udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            udp.bind((client_ip, 0))
+            udp.connect((self.host, self.port))
+        udp.settimeout(1.5)
+        self._udp = udp
+
+        # NOTE: do NOT insert any blocking wait between connect-commit and the
+        # TCP match. The OPEN_WAIT window is only ~0.5s.
         self._udp.send(p.pack_connect_init(device_mac, client_ip, self._node))
         try:
             self._udp.recv(256)   # "OK"
@@ -166,20 +188,17 @@ class SxuptpClient:
         except socket.timeout:
             pass
 
-        # best-effort devId capture (byte 3 of the host's announcement)
-        if cap:
-            t0 = time.time()
-            while time.time() - t0 < 1.0:
-                try:
-                    d, a = cap.recvfrom(4096)
-                except socket.timeout:
-                    continue
+        # best-effort, NON-blocking devId capture from the grant on :19540
+        if self._bc is not None:
+            self._bc.settimeout(0.0)
+            try:
+                d, a = self._bc.recvfrom(4096)
                 if a[0] == self.host and len(d) > 3:
                     self.dev_id = d[3]
-                    break
-            cap.close()
+            except (BlockingIOError, OSError):
+                pass
 
-        # TCP match (catch the OPEN_WAIT window)
+        # TCP match immediately (catch the OPEN_WAIT window)
         t0 = time.time()
         while time.time() - t0 < window:
             s = socket.socket()
@@ -240,13 +259,16 @@ class SxuptpClient:
         return out
 
     def disconnect(self) -> None:
-        """Free the device slot (EXEC SCANNER DISCONNECT) and close the channel."""
+        """Free the device slot (EXEC SCANNER DISCONNECT) and close the channel.
+        Sockets passed in by the caller (shared session/grant sockets) are left
+        open; only sockets this client created are closed."""
         if getattr(self, "_udp", None):
             try:
                 self._udp.send(p.pack_disconnect(self._mac, self._client_ip, self._node))
             except OSError:
                 pass
-            self._udp.close()
+            if getattr(self, "_owns_udp", True):
+                self._udp.close()
             self._udp = None
         self.close()
 
@@ -254,3 +276,7 @@ class SxuptpClient:
         if self.tcp:
             self.tcp.close()
             self.tcp = None
+        if getattr(self, "_bc", None):
+            if getattr(self, "_owns_bc", True):
+                self._bc.close()
+            self._bc = None
