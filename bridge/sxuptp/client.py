@@ -102,40 +102,80 @@ class SxuptpClient:
             s.close()
 
     # --- session (TCP 19540) --------------------------------------------
-    def connect(self) -> None:
-        self.tcp = socket.create_connection((self.host, self.port), self.timeout)
-        self.tcp.settimeout(self.timeout)
-
     def attach(self, port_name: str, device_mac: bytes, client_ip: str,
-               window: float = 5.0) -> None:
+               window: float = 5.0) -> int | None:
         """
-        Claim a device and open the TCP data channel. CONFIRMED live.
+        Claim a device and open the TCP data channel. CONFIRMED live (first real
+        USB transfer obtained 2026-10-10).
 
-        Sequence: JCP `EXEC SCANNER CONNECT` (cmd=1) creates a job; the device
-        advances it to OPEN_WAIT (~0.5s) via its pump; we then TCP-connect and
-        the device matches the job by our peer IP -> data channel open. Because
-        the OPEN_WAIT window is short and then times out, we retry the TCP
-        connect across `window` seconds to catch it. Leaves self.tcp connected.
+        Sequence (byte-identical to the official driver / pybelkusb):
+          1. UDP `EXEC SCANNER CONNECT` cmd 0x0001 -> creates the job ("OK").
+          2. UDP `EXEC SCANNER CONNECT` cmd 0x0003 -> commits it; the device
+             advances the job to OPEN_WAIT and announces the devId.
+          3. TCP-connect; the device matches the job by our peer IP. The
+             OPEN_WAIT window is brief, so we retry the connect across `window`.
+
+        IMPORTANT: `client_ip` must NOT be the hub's network gateway. From the
+        gateway IP the device replies "NG"; a non-gateway client IP is required
+        (documented by pybelkusb and confirmed here). `device_mac` is the hub's
+        MAC (from discovery). Returns the devId if the announcement was captured,
+        else None (use find_dev_id() to sweep). Leaves self.tcp connected and
+        records the session for disconnect().
         """
-        import struct
-        u = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        u.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        import time
+        self._node = port_name.encode("latin1") if isinstance(port_name, str) else port_name
+        self._mac = device_mac
+        self._client_ip = client_ip
+        self.seq = 0
+        self.dev_id: int | None = None
+
+        # capture socket on ('', port) so the devId announcement arrives (on BSD a
+        # socket bound to a specific unicast IP would drop a broadcast).
+        cap = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        cap.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        cap.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         try:
-            u.bind(("", self.port))
+            cap.bind(("", self.port))
         except OSError:
-            pass
-        u.settimeout(1.2)
-        u.sendto(p.pack_scanner_connect(port_name, client_ip, device_mac), (self.host, self.port))
+            cap = None
+        if cap:
+            cap.settimeout(0.1)
+
+        self._udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self._udp.bind((client_ip, 0))
+        self._udp.connect((self.host, self.port))
+        self._udp.settimeout(1.5)
+        self._udp.send(p.pack_connect_init(device_mac, client_ip, self._node))
         try:
-            u.recv(256)   # "OK"
+            self._udp.recv(256)   # "OK"
         except socket.timeout:
             pass
-        import time
+        self._udp.send(p.pack_connect_commit(device_mac, client_ip, self._node))
+        try:
+            self._udp.recv(256)
+        except socket.timeout:
+            pass
+
+        # best-effort devId capture (byte 3 of the host's announcement)
+        if cap:
+            t0 = time.time()
+            while time.time() - t0 < 1.0:
+                try:
+                    d, a = cap.recvfrom(4096)
+                except socket.timeout:
+                    continue
+                if a[0] == self.host and len(d) > 3:
+                    self.dev_id = d[3]
+                    break
+            cap.close()
+
+        # TCP match (catch the OPEN_WAIT window)
         t0 = time.time()
         while time.time() - t0 < window:
             s = socket.socket()
             s.settimeout(0.5)
             try:
+                s.bind((client_ip, 0))
                 s.connect((self.host, self.port))
                 s.settimeout(0.5)
                 try:
@@ -143,40 +183,62 @@ class SxuptpClient:
                 except socket.timeout:
                     pass
                 self.tcp = s
-                u.close()
-                return
+                return self.dev_id
             except (ConnectionResetError, ConnectionAbortedError, OSError):
                 s.close()
             time.sleep(0.08)
-        u.close()
         raise TimeoutError("could not match the OPEN_WAIT window (power-cycle if slot busy)")
 
-    def control_transfer(self, setup: p.Setup, data: bytes = b"") -> bytes:
-        """Send a control (category 1) message and read the response.
-
-        The request framing is CONFIRMED; the response parsing assumes the device
-        echoes a 24-byte header + data (INFERRED length handling).
-        """
+    def _control(self, dev_id: int, setup: p.Setup, data: bytes = b"") -> tuple[int, bytes]:
+        """One control transfer on an open channel -> (status, data). CONFIRMED."""
         if self.tcp is None:
-            raise RuntimeError("not connected")
-        msg = p.Message(category=p.CAT_CONTROL, endpoint=0x00, setup=setup, data=data)
-        self.tcp.sendall(msg.pack())
-        hdr = self._recv_exact(p.HEADER_LEN)
-        reply = p.Message.unpack(hdr)
-        # INFERRED: a device->host control reply carries wLength bytes of data
-        want = setup.wLength if (setup.bmRequestType & 0x80) else 0
-        payload = self._recv_exact(want) if want else b""
-        return payload
+            raise RuntimeError("not attached")
+        self.seq += 1
+        if setup.bmRequestType & 0x80:          # device -> host (read)
+            req = p.control_read(dev_id, setup.bmRequestType, setup.bRequest,
+                                 setup.wValue, setup.wIndex, setup.wLength, seq=self.seq)
+        else:                                    # host -> device (write)
+            req = p.control_write(dev_id, setup.bmRequestType, setup.bRequest,
+                                  setup.wValue, setup.wIndex, data, seq=self.seq)
+        self.tcp.sendall(req)
+        self.tcp.settimeout(self.timeout)
+        reply = self.tcp.recv(4096)
+        return p.parse_control_reply(reply)
 
-    def _recv_exact(self, n: int) -> bytes:
-        assert self.tcp is not None
-        buf = b""
-        while len(buf) < n:
-            chunk = self.tcp.recv(n - len(buf))
-            if not chunk:
-                raise ConnectionError("peer closed during recv")
-            buf += chunk
-        return buf
+    def find_dev_id(self, candidates: tuple[int, ...] = (3, 1, 2, 4, 5, 0, 6, 7, 8)) -> int:
+        """Probe candidate devIds with GET_DESCRIPTOR(device) until one returns
+        STATUS_OK, and remember it. Needed when the announcement was not captured.
+        """
+        setup = p.Setup.get_descriptor(desc_type=1, desc_index=0, length=18)
+        order = ([self.dev_id] if self.dev_id is not None else []) + \
+                [c for c in candidates if c != self.dev_id]
+        for dv in order:
+            status, data = self._control(dv, setup)
+            if status == p.STATUS_OK and data[:2] == b"\x12\x01":
+                self.dev_id = dv
+                return dv
+        raise RuntimeError("no devId returned a device descriptor")
+
+    def control_transfer(self, setup: p.Setup, data: bytes = b"") -> bytes:
+        """Send a control transfer and return the data stage (b"" for writes).
+        Raises if the device reports a non-OK status. CONFIRMED live."""
+        if self.dev_id is None:
+            self.find_dev_id()
+        status, out = self._control(self.dev_id, setup, data)
+        if status != p.STATUS_OK:
+            raise RuntimeError(f"control transfer failed: status=0x{status:04x}")
+        return out
+
+    def disconnect(self) -> None:
+        """Free the device slot (EXEC SCANNER DISCONNECT) and close the channel."""
+        if getattr(self, "_udp", None):
+            try:
+                self._udp.send(p.pack_disconnect(self._mac, self._client_ip, self._node))
+            except OSError:
+                pass
+            self._udp.close()
+            self._udp = None
+        self.close()
 
     def close(self) -> None:
         if self.tcp:

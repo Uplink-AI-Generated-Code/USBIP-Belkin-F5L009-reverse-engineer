@@ -26,14 +26,14 @@ def cmd_dry_run() -> int:
     print(f"SXUPTP port: {p.PORT} (TCP+UDP)")
     disc = p.pack_identify()
     print(f"\nJCP identity/discovery request ({len(disc)} B):\n  {hexdump(disc)}")
-    setup = p.Setup.get_descriptor(desc_type=1, desc_index=0, length=18)
-    msg = p.Message(category=p.CAT_CONTROL, endpoint=0x00, setup=setup)
-    raw = msg.pack()
-    print(f"\ncontrol GET_DESCRIPTOR(device) message ({len(raw)} B):\n  {hexdump(raw)}")
-    print(f"  header type = 0x{raw[0]:02x}{raw[1]:02x} (dir=request, cat=control)")
-    print(f"  SETUP @0x0C = {hexdump(raw[0x0C:0x14])}")
-    print("\n(these are the on-wire bytes per the reverse-engineered framing; "
-          "CONFIRMED for ports/framing/SETUP, see SXUPTP_PROTOCOL.md)")
+    raw = p.control_read(dev_id=4, bm_request_type=0x80, b_request=0x06,
+                         w_value=0x0100, w_index=0, length=18, seq=1)
+    print(f"\ncontrol GET_DESCRIPTOR(device) request ({len(raw)} B):\n  {hexdump(raw)}")
+    print(f"  type=0x{raw[0]:02x}{raw[1]:02x} (ctrl-read)  field0x04=0x{raw[4]:02x}{raw[5]:02x}"
+          f"  devId={raw[6]}  SETUP @0x0C={hexdump(raw[0x0C:0x16])}")
+    print("  (reply: 10-byte header `type seq status _ size`, then `size` data bytes)")
+    print("\n(on-wire bytes per the reverse-engineered framing; CONFIRMED live "
+          "against 192.168.2.3 — see SXUPTP_PROTOCOL.md)")
     return 0
 
 
@@ -50,19 +50,36 @@ def cmd_discover(broadcast: str) -> int:
     return 0
 
 
-def cmd_getdesc(host: str) -> int:
+def cmd_getdesc(host: str, client_ip: str, node: str | None) -> int:
+    """Attach to a device and fetch its USB device descriptor. CONFIRMED live.
+
+    `client_ip` must be a non-gateway IP on the hub's subnet (see attach()).
+    """
+    # resolve the hub MAC via discovery, and a device node via the device list
+    devs = SxuptpClient.discover(target=host)
+    if not devs:
+        print(f"no device answered discovery at {host}")
+        return 1
+    mac = bytes(int(x, 16) for x in devs[0]["mac"].split(":"))
+    if node is None:
+        listed = SxuptpClient.list_devices(host)
+        if not listed:
+            print("no USB devices listed on the hub")
+            return 1
+        node = listed[0]["port"]
+        print(f"using node {node} ({listed[0]['device']})")
+
     c = SxuptpClient(host)
-    c.connect()
     try:
-        c.attach(device_id=0)  # not yet implemented
+        dev_id = c.attach(node, mac, client_ip)
+        print(f"attached (devId announced: {dev_id})")
         desc = c.control_transfer(p.Setup.get_descriptor(1, 0, 18))
-        print(f"device descriptor ({len(desc)} B): {hexdump(desc)}")
+        vid = desc[8] | (desc[9] << 8); pid = desc[10] | (desc[11] << 8)
+        print(f"device descriptor ({len(desc)} B, devId={c.dev_id}): {hexdump(desc)}")
+        print(f"  idVendor:idProduct = {vid:04x}:{pid:04x}")
         return 0
-    except NotImplementedError as e:
-        print(f"attach not implemented: {e}")
-        return 2
     finally:
-        c.close()
+        c.disconnect()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -74,6 +91,9 @@ def main(argv: list[str] | None = None) -> int:
     d.add_argument("--broadcast", default="255.255.255.255")
     g = sub.add_parser("getdesc")
     g.add_argument("host")
+    g.add_argument("--client-ip", required=True,
+                   help="a NON-gateway IP on the hub's subnet to connect from")
+    g.add_argument("--node", default=None, help="device node devNN (default: first listed)")
     dl = sub.add_parser("devlist")
     dl.add_argument("host")
     args = ap.parse_args(argv)
@@ -83,7 +103,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "discover":
         return cmd_discover(args.broadcast)
     if args.cmd == "getdesc":
-        return cmd_getdesc(args.host)
+        return cmd_getdesc(args.host, args.client_ip, args.node)
     if args.cmd == "devlist":
         for d in SxuptpClient.list_devices(args.host):
             print(f"  {d['port']}  {d['device']}")

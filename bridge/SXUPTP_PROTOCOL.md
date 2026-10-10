@@ -391,11 +391,12 @@ with `devXX` nodes + `80 81` marker + VID/PID; `EXEC SCANNER CONNECT` body
 
 **What it adds — the data-channel transfer framing (the `0xffff` fix):**
 
-- Control-IN (24-byte header, big-endian):
-  `[0:2]=0001 [2:4]=seq [4:6]=0001 [6:8]=devId<<8 [8:10]=0201 [10:12]=0008`
+- Control-IN (22-byte request, big-endian):
+  `[0:2]=0001 [2:4]=seq [4:6]=0002 [6:8]=devId<<8 [8:10]=0201 [10:12]=0008`
   then `[12]=bmRequestType [13]=bRequest [14:16]=wValue [16:18]=wIndex
-  [18:20]=0000 [20:22]=wLength`. **We left `[4:6]/[6:8]/[8:10]/[10:12]` zero —
-  the missing `devId` at `[6]` is exactly the `(Ctrl)Not found DevAddr` error.**
+  [18:20]=0000 [20:22]=wLength`. **NOTE `[4:6]=0002` for reads (pybelkusb's own
+  code wrongly used `0001`; the real driver uses `0002` — see the "FIRST REAL USB
+  TRANSFER" section). `devId` sits at `[6]`.**
 - Control-OUT: prefix `8001`, field0 `0003`, payload appended.
 - Bulk-OUT: prefix `8003`, body `>HHBBHLH` {`0003`→`(devId<<8)|02`, ep, `01`,
   `8040`, `0`, len} + payload.
@@ -437,6 +438,48 @@ sudo ifconfig bridge100 alias 192.168.2.50 255.255.255.0
 Then re-run the faithful test with client IP `192.168.2.50` (both as the body IP
 and the socket source). If pybelkusb's observation holds, the devId announcement
 should appear and the control transfer should return the device descriptor.
+
+## ✅ FIRST REAL USB TRANSFER (CONFIRMED live, 2026-10-10)
+
+From the non-gateway alias `192.168.2.50`, a control GET_DESCRIPTOR(device)
+returned a genuine 18-byte USB device descriptor over the TCP data channel:
+
+```
+request : 00 01 00 04 00 02 04 00 02 01 00 08 80 06 01 00 00 00 00 00 00 12
+reply   : 00 01 00 04 00 00 00 00 00 12 | 12 01 00 02 00 00 00 08 45 0c 03 86 00 02 01 02 00 01
+          type  seq  stat _    size=18  | <device descriptor: VID:PID = 0C45:8603, SONiX>
+```
+
+Two independent bugs had to be fixed — **both** were required:
+
+1. **Control-read header field at offset 0x04 = `0x0002`, not `0x0001`.**
+   Ground-truth driver captures (pybelkusb braindump) show control *reads* carry
+   `0x0002` there and control *writes* carry `0x0003`. pybelkusb's own
+   `controlRead` hardcoded `0x0001` and never parsed the reply, so its reads
+   silently failed. With `0x0001` the device returns `status=0xffff` and no data;
+   with `0x0002` it returns `status=0x0000` and the descriptor. This — not the
+   ARM USB-host-controller path analysed earlier — is the real origin of the
+   `0xffff` we kept seeing. (The static-RE "provable limit" conclusion above was
+   wrong on this point; the capture settled it.)
+
+2. **Client IP must not be the hub's gateway.** From `192.168.2.1` (the Mac's
+   Internet-Sharing gateway) CONNECT returns `NG`; from the `192.168.2.50` alias
+   it returns `OK` and the OPEN_WAIT→TCP match succeeds.
+
+**devId:** the `:19540` announcement still did not arrive on the capture socket
+in our setup, so the client sweeps candidate devIds with GET_DESCRIPTOR until one
+returns `STATUS_OK`. A CONNECT on node `dev01` (Corsair) yielded the working
+handle **devId=4** (a SONiX keyboard) — i.e. the devId is a transport handle and
+does **not** equal the `devNN` index.
+
+**Reply framing (CONFIRMED):** 10-byte header `type(2) seq(2) status(2) _(2)
+size(2)`, then `size` data bytes. `status` `0x0000`=OK, `0xffff`=failed. Bulk
+replies use the same 10-byte header (`parse_control_reply` handles both).
+
+Implemented and self-tested in `sxuptp.protocol` (`control_read` now sends
+`0x0002`; `parse_control_reply`; `pack_connect_init`/`pack_connect_commit`/
+`pack_disconnect`) and driven by `SxuptpClient.attach()` + `control_transfer()`.
+CLI: `python3 -m bridge.sxuptp.probe getdesc 192.168.2.3 --client-ip 192.168.2.50`.
 
 ## Transport map (Milestone 1 — confirmed)
 
