@@ -167,13 +167,30 @@ So **USB ports are named `devNN`**, not `scn1`. Implemented in
   (names `devNN`). CONFIRMED the names via `GET USB_DEVICE_LIST`.
 
 Tested live with `port_name` `scn1` and `dev01`, correct device MAC + client IP:
-command accepted (`0003…`), but **no job allocated yet** (device still "Not
-Connected", TCP RST). Remaining: the exact **JCP_EXT** request framing. The
-firmware strings show a separate extended handler (`JCP_EXT: init <misp 39
-template>`, `JCP_EXT: JCP Name >> %s`); `EXEC SCANNER CONNECT` is a JCP_EXT
-command whose name/body wire offsets differ from the basic JCP vars, so the body
-isn't landing where `sub_002FA478` expects. Reversing the JCP_EXT dispatch is the
-next step.
+command accepted (`0003…`), but **no job allocated** — because the request is a
+**fixed-layout template**, not the compact form I sent.
+
+### Why attach needs a template (JCP_EXT dispatch reversed)
+
+The JCP_EXT command table is at `0x33A5C4` (16-byte entries
+`{name, len, handler, arg}`). `EXEC SCANNER CONNECT` → handler `0x32FCC8` (the
+EXEC trampoline), arg `sub_002FA478` (the real action).
+
+`sub_0032FCC8` parses the request as a **fixed template** ("misp template 39"):
+it reads a class field at `req[0:2]` (1 or 3), another at `req[2:4]`, and
+parameters at **`req[0x54]` and `req[0x56]`**, and copies templated fields by
+`pos`/`len` (logs `JCP: %s X[pos:%x len:%x]`). Only then does it hand a body to
+`sub_002FA478`. So `EXEC SCANNER CONNECT` is a **large, fixed-offset structure**
+(≥0x58 bytes) — the `{flag,mac,ip,name}` body sits at template offsets, not
+immediately after the command name. My compact packet put those bytes in the
+wrong place, so the pre-check/parse silently no-op'd.
+
+**Status:** attach is fully understood *mechanically* (CONNECT → job OPEN_WAIT →
+TCP match → active; device MAC + `devNN` name required), but the exact **misp
+template 39 field layout** is the one remaining unknown. Decoding it statically
+means reversing the template descriptor table; a **single capture of the real
+SX Virtual Link client performing a connect** would give the byte layout
+directly. This is the efficient unlock and the recommended next step.
 
 ### Remaining detail
 
