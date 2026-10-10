@@ -263,25 +263,37 @@ class SxuptpClient:
         status, _ = self._recv_reply()
         return status
 
+    # Per-request cap for bulk IN. Must be 512-aligned: one SXUPTP bulk_read maps
+    # to one USB bulk IN of this many bytes, and a non-512-aligned size corrupts
+    # USB packetization mid-stream (observed: 0xFFFF reset the device). The length
+    # field is 16-bit, so this is the largest 512-multiple that fits.
+    _BULK_CHUNK = 0xFE00   # 65024 = 127 * 512
+
     def bulk_in(self, ep_addr: int, length: int) -> tuple[int, bytes]:
         """Bulk/interrupt IN transfer -> (status, data). ep_addr has bit7=1 (IN).
-        Re-requests until `length` bytes arrive or a short/zero packet ends it."""
+
+        One SXUPTP bulk_read = one USB bulk IN of the requested size; the firmware
+        returns the actual bytes (verified: a 4096-byte read came back whole). A
+        reply SHORTER than requested is a USB short packet = end of transfer, so we
+        stop (re-requesting would pull the next transfer's bytes, e.g. a CSW, and
+        desync mass storage). Larger transfers are split into 512-aligned chunks.
+        """
         if self.tcp is None or self.dev_id is None:
             raise RuntimeError("not attached")
         out = b""
         remaining = length
         while remaining > 0:
-            chunk_req = min(remaining, 0xFFFF)
+            req = min(remaining, self._BULK_CHUNK)
             self.seq += 1
-            self.tcp.sendall(p.bulk_read(self.dev_id, ep_addr, chunk_req, seq=self.seq))
+            self.tcp.sendall(p.bulk_read(self.dev_id, ep_addr, req, seq=self.seq))
             self.tcp.settimeout(self.timeout)
             status, data = self._recv_reply()
             if status != p.STATUS_OK:
                 return status, out
             out += data
-            if len(data) < chunk_req:        # short packet / ZLP => transfer done
-                break
             remaining -= len(data)
+            if len(data) < req:              # USB short packet => transfer complete
+                break
         return p.STATUS_OK, out
 
     def find_dev_id(self, candidates: tuple[int, ...] = (1, 2, 3, 4, 5, 6, 7, 8, 0),

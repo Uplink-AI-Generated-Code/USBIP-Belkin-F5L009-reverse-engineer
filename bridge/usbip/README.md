@@ -35,8 +35,9 @@ usbip attach -r <server-host> -b 1-1   # imports the device
 | IMPORT → SXUPTP attach + descriptor read | **wired; drives the real attach** |
 | Control (ep0) SUBMIT → SXUPTP control transfer | **working live** |
 | End-to-end IMPORT + CMD_SUBMIT (GET_DESCRIPTOR) | **working live** — a Python USB/IP client round-tripped an 18-byte device descriptor through the full stack |
-| Bulk / interrupt endpoints | **working live** — a Mass-Storage Bulk-Only INQUIRY (CBW→data→CSW) round-tripped on the Corsair (bulk OUT 0x01 / IN 0x82), returning vendor `Corsair`, product `Voyager SliderX1`, CSW status 0 |
-| `usbip attach` from a real Linux client | not yet tried (no Linux client here); the wire protocol is validated by the Python client |
+| Bulk / interrupt endpoints | **working live** — large reads chunked at a 512-aligned size; short packet (reply < requested) ends the transfer |
+| Device speed | **auto-derived** from the descriptors (512-byte endpoint → high speed; EP0 maxpacket 8 → low speed; else full) so the vhci doesn't clamp maxpacket |
+| `usbip attach` from a real Linux client | **VERIFIED** — a stock Linux `usbip` kernel client attached `1-1`, enumerated it high-speed (Corsair Voyager, serial AALPK8GRLXFLWAX0), mounted its exFAT filesystem read-only, and read files. 4 MB read at ~2.6 MB/s, no errors. See CLIENT.md. |
 
 ## Operational caveats (learned against hardware)
 

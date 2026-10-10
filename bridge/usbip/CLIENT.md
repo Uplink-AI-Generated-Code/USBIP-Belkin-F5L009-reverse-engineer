@@ -122,31 +122,45 @@ sudo usbip detach -p 00
 Detaching closes the TCP connection; our server RST-closes the SXUPTP channel,
 which frees the hub slot (no reboot needed), so you can re-attach immediately.
 
-## What is proven vs. what to watch for
+## Verified with a real Linux kernel
 
-**Proven live** (via the bundled Python probe and direct SXUPTP tests): device
-enumeration, IMPORT, control transfers (GET_DESCRIPTOR, SET_CONFIGURATION), and
-bulk IN/OUT (a Mass-Storage INQUIRY round-tripped on the Corsair), plus clean
-slot release across repeated attach/detach.
+A stock Linux `usbip` client **attached `1-1` and mounted the flash drive**: the
+kernel enumerated it at high speed (Corsair Voyager, serial `AALPK8GRLXFLWAX0`),
+usb-storage bound it as `/dev/sda`, the GPT/exFAT partition `sda1` was read, it
+mounted read-only, and files were read back. A 4 MB read ran at ~2.6 MB/s with no
+I/O errors or resets. Control, bulk IN/OUT, device-speed, and clean slot release
+are all exercised by this path.
 
-**Not yet exercised with a real kernel client** — if attach or I/O misbehaves,
-likely suspects, in order:
+### No Linux box? Use Docker (how the above was verified)
 
-1. **Reported speed.** The server advertises *full speed* for every device; the
-   Corsair is actually high speed (`bcdUSB 2.10`, 64-byte EP0). If the vhci
-   rejects or mis-drives it, set the device's `speed` to `SPEED_HIGH` in
-   `server.Hub.devlist()` / `backend.Device.attach()` (the `UsbipDevice.speed`
-   field). This is the most probable first issue.
-2. **Large bulk reads.** Bulk was verified with a 36-byte INQUIRY. Larger reads
-   are chunked to the 16-bit SXUPTP length field (`client.bulk_in`); mass-storage
-   data phases should work but haven't been tested at size.
-3. **Isochronous is not implemented** (webcams/audio won't work). Mass storage
+Docker Desktop's LinuxKit kernel has `vhci_hcd` built in, so a privileged
+container is a real `usbip` client reaching the Mac via `host.docker.internal`:
+
+```bash
+docker run -d --name usbiptest --privileged archlinux sleep infinity
+docker exec usbiptest pacman -Sy --noconfirm usbip        # standalone usbip-utils
+docker exec usbiptest usbip list   -r host.docker.internal
+docker exec usbiptest usbip attach -r host.docker.internal -b 1-1
+docker exec usbiptest sh -c 'mknod /dev/sda b 8 0; mknod /dev/sda1 b 8 1; \
+    pacman -Sy --noconfirm exfatprogs util-linux; \
+    mount -o ro /dev/sda1 /mnt && ls -la /mnt'
+```
+
+(Arch is used because Ubuntu/Alpine tie `usbip` to a kernel-version package;
+Arch ships it standalone. The container needs `--privileged` for `/sys` access to
+the vhci. `/dev/sda*` nodes may need `mknod` since the container's `/dev` is
+minimal.)
+
+## What to watch for
+
+1. **Isochronous is not implemented** (webcams/audio won't work). Mass storage
    and HID (keyboards) use control/bulk/interrupt only, which are implemented.
-4. **One device at a time** is the safe assumption: the server shares a single
+2. **One device at a time** is the safe assumption: the server shares a single
    SXUPTP session socket and serializes attaches. Importing a second device
    while one is attached is untested.
-5. **Client IP must stay non-gateway** on the Mac side; if the alias is lost
+3. **Client IP must stay non-gateway** on the Mac side; if the alias is lost
    (e.g. after toggling Internet Sharing) attaches fail until it's re-added.
+4. **Port 3240** must be free of any other `usbipd` (see the note above).
 
 ## Quick alternative without the kernel (sanity check)
 

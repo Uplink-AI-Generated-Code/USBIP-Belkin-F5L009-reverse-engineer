@@ -77,9 +77,11 @@ class Device:
         num_intf = cfg[4] if len(cfg) >= 5 else 1
         cfg_value = cfg[5] if len(cfg) >= 6 else 1
 
-        # per-interface class triples from the full config descriptor
+        # per-interface class triples + max endpoint packet size, from the full
+        # config descriptor
         total = (cfg[2] | (cfg[3] << 8)) if len(cfg) >= 4 else 9
         interfaces: list[tuple[int, int, int]] = []
+        max_ep_mps = 0
         if total > 9:
             full = c.control_transfer(sx.Setup.get_descriptor(desc_type=2, desc_index=0,
                                                              length=total))
@@ -90,11 +92,27 @@ class Device:
                     break
                 if btype == 0x04 and i + 8 < len(full):      # INTERFACE descriptor
                     interfaces.append((full[i + 5], full[i + 6], full[i + 7]))
+                elif btype == 0x05 and i + 6 < len(full):    # ENDPOINT descriptor
+                    mps = (full[i + 4] | (full[i + 5] << 8)) & 0x07FF
+                    max_ep_mps = max(max_ep_mps, mps)
                 i += blen
+
+        # Derive the USB speed the hub must advertise to the client, so the vhci
+        # does not clamp maxpacket (full-speed + 512-byte bulk EPs -> EPIPE loop).
+        #   512-byte endpoint  -> high speed
+        #   EP0 maxpacket == 8 -> low speed (e.g. the keyboards)
+        #   otherwise          -> full speed
+        bmps0 = dd[7] if len(dd) > 7 else 64
+        if max_ep_mps >= 512:
+            speed = u.SPEED_HIGH
+        elif bmps0 <= 8:
+            speed = u.SPEED_LOW
+        else:
+            speed = u.SPEED_FULL
 
         self.info = u.UsbipDevice(
             busid=self.busid, busnum=self.busnum, devnum=self.devnum,
-            speed=u.SPEED_FULL, id_vendor=id_vendor, id_product=id_product,
+            speed=speed, id_vendor=id_vendor, id_product=id_product,
             bcd_device=bcd_device, b_device_class=dev_class,
             b_device_subclass=dev_sub, b_device_protocol=dev_proto,
             b_configuration_value=cfg_value, b_num_configurations=num_cfg or 1,
