@@ -304,10 +304,14 @@ def _selftest() -> None:
 # A control request is 22 bytes on the wire:
 #   [0:2] type   0001 ctrl-read / 8001 ctrl-write  (0x80 = host->device data)
 #   [2:4] seq    incrementing per transfer on the TCP channel
-#   [4:6] 0x0002 for a control READ, 0x0003 for a control WRITE  <-- NOT 0x0001;
-#               pybelkusb's controlRead hardcoded 0x0001 and never checked the
-#               reply, so its reads silently failed (device returns status 0xffff).
+#   [4:6] 0x0002 (control READ) / 0x0003 (control WRITE) in the real driver.
+#               The firmware parser only STORES this half-word and never reads
+#               it; the reply overwrites the slot with the status. It is cosmetic
+#               (we send it to match the driver), not a gating field.
 #   [6:8] devId<<8   [8:10] 0x0201   [10:12] 0x0008
+#               devId is the only one of these the firmware acts on: byte [6] is
+#               the USB device address, looked up by sub_0031F368; byte [7] is
+#               the endpoint. 0x0201 and 0x0008 are stored-and-ignored constants.
 #   [12] bmRequestType [13] bRequest [14:16] wValue [16:18] wIndex
 #   [18:20] 0x0000 [20:22] wLength
 # The reply is a 10-byte header (see parse_control_reply) + `size` data bytes.
@@ -320,12 +324,14 @@ def control_read(dev_id: int, bm_request_type: int, b_request: int,
                  w_value: int, w_index: int, length: int, seq: int = 0) -> bytes:
     """Build a control-IN (device->host) message.
 
-    Field at offset 0x04 is 0x0002 for control-IN (NOT 0x0001). This is confirmed
-    by ground-truth driver captures (pybelkusb braindump): control reads carry
-    0x0002 there, control writes 0x0003. pybelkusb's own controlRead hardcoded
-    0x0001 and never verified the reply, so the error went unnoticed; the real
-    driver and the device both use 0x0002, and 0x0001 makes the device return a
-    0xffff status with no data.
+    Offset 0x04 is set to 0x0002 to match the official driver's control-read
+    bytes (control writes use 0x0003). NOTE on causation: the firmware message
+    parser (sub_0030481C) only *stores* this half-word (strh [r6,#4]) and never
+    reads it back; the reply reuses the same slot for the completion status
+    (0x0000 OK / 0xffff fail). So this value is cosmetic/faithful, NOT what
+    unblocks a transfer. The real device selector is the devId byte at 0x06
+    (USB device-address lookup, sub_0031F368) — a wrong devId is what returns
+    0xffff. We still send 0x0002 to stay byte-identical to the real driver.
     """
     return struct.pack(">HHHHHH BBHHHH",
                        0x0001, seq & 0xFFFF, 0x0002, (dev_id & 0xFF) << 8,

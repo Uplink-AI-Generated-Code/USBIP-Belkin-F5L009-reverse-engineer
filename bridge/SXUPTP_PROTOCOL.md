@@ -450,27 +450,50 @@ reply   : 00 01 00 04 00 00 00 00 00 12 | 12 01 00 02 00 00 00 08 45 0c 03 86 00
           type  seq  stat _    size=18  | <device descriptor: VID:PID = 0C45:8603, SONiX>
 ```
 
-Two independent bugs had to be fixed — **both** were required:
+Two things had to be right (firmware-confirmed causes — see the field-by-field
+breakdown below, since an initial guess about field `+0x04` was wrong):
 
-1. **Control-read header field at offset 0x04 = `0x0002`, not `0x0001`.**
-   Ground-truth driver captures (pybelkusb braindump) show control *reads* carry
-   `0x0002` there and control *writes* carry `0x0003`. pybelkusb's own
-   `controlRead` hardcoded `0x0001` and never parsed the reply, so its reads
-   silently failed. With `0x0001` the device returns `status=0xffff` and no data;
-   with `0x0002` it returns `status=0x0000` and the descriptor. This — not the
-   ARM USB-host-controller path analysed earlier — is the real origin of the
-   `0xffff` we kept seeing. (The static-RE "provable limit" conclusion above was
-   wrong on this point; the capture settled it.)
+1. **Correct devId (USB device address).** The device is resolved from the byte
+   at wire offset `+0x06` by `sub_0031F368` (device-address table walk; firmware
+   strings `DevAddr : 0x%ox`, `ohci: ep not found`). A devId that does not
+   resolve is exactly the `0xffff` status we kept getting for handles 3/1/2. The
+   `:19540` announcement did not arrive on the capture socket in our setup, so
+   the client sweeps candidate devIds with GET_DESCRIPTOR until one returns
+   `STATUS_OK`. A CONNECT on node `dev01` (Corsair) yielded the working handle
+   **devId=4** (a SONiX keyboard) — the devId is a transport/address handle and
+   does **not** equal the `devNN` index.
 
 2. **Client IP must not be the hub's gateway.** From `192.168.2.1` (the Mac's
    Internet-Sharing gateway) CONNECT returns `NG`; from the `192.168.2.50` alias
    it returns `OK` and the OPEN_WAIT→TCP match succeeds.
 
-**devId:** the `:19540` announcement still did not arrive on the capture socket
-in our setup, so the client sweeps candidate devIds with GET_DESCRIPTOR until one
-returns `STATUS_OK`. A CONNECT on node `dev01` (Corsair) yielded the working
-handle **devId=4** (a SONiX keyboard) — i.e. the devId is a transport handle and
-does **not** equal the `devNN` index.
+**Correction — the `+0x04` = `0x0002` field is NOT a cause.** The official driver
+puts `0x0002` at `+0x04` for reads (`0x0003` for writes) and pybelkusb hardcoded
+`0x0001` there, so this looked like the fix. But the firmware message parser
+(`sub_0030481C`) only *stores* the `+0x04` and `+0x08` half-words (`strh [r6,#4]`
+/ `strh [r6,#8]`) and never reads them; the reply reuses `+0x04` for the
+completion status. Our earlier "it mattered" observation was confounded — a
+preceding `devId=8` timeout had stalled that TCP channel, so `devId=4` looked
+like it failed under `0x0001` when the channel was simply dead. We still send
+`0x0002` to stay byte-identical to the real driver, but it is cosmetic. (So the
+ARM USB-host-controller "provable limit" analysis was not overturned by a magic
+constant; the blockers were the devId and the client IP.)
+
+### What each header field does (confirmed in `sub_0030481C` / `sub_0031F368`)
+
+| wire | value | firmware behaviour |
+|---|---|---|
+| `+0x00` type | `(dir<<8)\|category` | category dispatched @`0x3048f8` (1=control→`0x304c96`; 2/3=data engine→`0x304904`; 4=ext; else `-ERR_HDR-`); dir sign-bit @`0x304a22` sets IN/OUT |
+| `+0x02` | seq/tag | stored, echoed in the reply |
+| `+0x04` | `0002`/`0003` | **write-only** (`strh [r6,#4]`); reply overwrites with status — cosmetic |
+| `+0x06` | devId | **USB device address**, looked up by `sub_0031F368`; miss → `0xffff` |
+| `+0x07` | endpoint | EP# = low nibble, bit7 = IN (`ands #0xf`) |
+| `+0x08` | `0201` | **write-only** (`strh [r6,#8]`) — cosmetic |
+| `+0x0A` | `0008` | not consumed on the control path (SETUP starts at `+0x0C`) |
+| `+0x0C` | SETUP (10B) | `bmReq,bReq,wValue(BE),wIndex(BE),wLength(BE u32)` → serialized to a real 8-byte USB SETUP by `sub_0031EF2C` (32-bit wire wLength truncated to USB's 16-bit) |
+
+Control path requires ≥ 22 bytes (`cmp r4,#0x15; bgt` @`0x304c9e`), matching the
+22-byte frame. The reply is the 10-byte header + `size` data bytes.
 
 **Reply framing (CONFIRMED):** 10-byte header `type(2) seq(2) status(2) _(2)
 size(2)`, then `size` data bytes. `status` `0x0000`=OK, `0xffff`=failed. Bulk

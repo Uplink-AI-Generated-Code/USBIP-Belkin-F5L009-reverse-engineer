@@ -40,14 +40,17 @@ python3 -m bridge.sxuptp.probe getdesc 192.168.2.3 --client-ip 192.168.2.50
 | `control_transfer()` (GET_DESCRIPTOR) | **CONFIRMED live** — returned a real 18-byte device descriptor |
 | Tested against hardware | **yes** (192.168.2.3, 2026-10-10) |
 
-### The two fixes that unlocked transfers
-1. Control-read header field at **offset 0x04 must be `0x0002`** (not `0x0001`).
-   pybelkusb hardcoded `0x0001` and never parsed the reply, so its reads
-   silently failed; the real driver uses `0x0002` and the device returns
-   `status=0xffff` otherwise.
+### The two fixes that unlocked transfers (firmware-confirmed)
+1. The **devId must resolve**. The firmware looks up the USB device by the byte
+   at wire offset `+0x06` (`sub_0031F368`); a devId that doesn't resolve returns
+   `status=0xffff`. The client sweeps for the working handle (devId=4 here).
 2. The client IP **must not be the hub's gateway**. From the gateway the CONNECT
    returns `NG`; from a non-gateway alias it returns `OK` and the data channel
    opens.
+
+(We also send `0x0002` at header `+0x04` to match the official driver, but the
+firmware stores that field without reading it — it is cosmetic, not a cause of
+the earlier `0xffff`. See `../SXUPTP_PROTOCOL.md` for the field-by-field RE.)
 
 Next (Milestone 6): wrap this in a USB/IP server so `usbip attach` works — the
 control path already maps cleanly onto `USBIP_CMD_SUBMIT`, and bulk/interrupt
