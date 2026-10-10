@@ -548,12 +548,38 @@ Firmware model (from the disassembly):
   USB interrupt INs to the device and buffering reports into the queue for our
   job. That trigger is the missing piece; nothing we send reaches it.
 
-To finish this, the efficient unlock is a **packet capture of the official
-driver / Control Center software doing keyboard I/O** (Wireshark on UDP+TCP
-19540), which would show the activation + report messages directly. Otherwise it
-needs deeper RE of the data pump (`0x306xxx`, the many callers of `0x3041e0`) and
-the class-driver open path to find the activation message. The architecture above
-is the map for either route.
+### USB host side (EHCI) — confirms the mechanism
+
+The keyboard is **low speed**, so its interrupt endpoint is polled by **EHCI as a
+periodic QH with split transactions** (strings `!EHCI: Periodic split recv err`,
+`ehci: intrq not found`, `!EHCI: Interrupt Task No QH`). Tracing it:
+
+- Submitting an interrupt transfer — `ehci_intr_submit` (`0x325cb0`) — **looks up
+  an existing QH** (`0x3206bc`) and registers a per-transfer completion callback
+  at `qh+0xc4`/`+0xc8`, then signals the EHCI interrupt task; if no QH exists it
+  logs `ehci: intrq not found` and returns `-1`.
+- The QH itself is get-or-created by the EHCI open-pipe (`~0x324540`, logs
+  `?EHCI: Got QHCB`), which allocates a QH control block and links it into the
+  periodic frame list (`PERIODICLISTBASE`).
+- On completion the chain reaches `0x305d58`, which allocates a queue node,
+  `memcpy`s the report, and enqueues it (`0x337428`) for a client read to drain.
+
+So the full report path is: **open interrupt pipe (QH) → submit interrupt
+transfer (register callback) → hardware polls (periodic split) → completion
+enqueues the report → client read dequeues it.** Our `bulk_read` only does the
+last step (dequeue) against a queue that is never filled, because nothing we send
+reaches the **submit/open** path (`0x305e20` → `0x325cb0` / `0x324540`).
+
+### Conclusion & the precise capture target
+
+Everything but **one client message** is understood end to end. In the capture of
+the official driver doing keyboard I/O, look for the **`C>D` message the driver
+sends that our client does not**, appearing **before** any key reports — that is
+the "open/submit interrupt pipe" message (it routes to `0x305e20`, not the
+`bulk_read` queue-read `0x304574`). Its framing (type/field at `+0x04`/endpoint)
+is all we need; after that, the `D>C` size-≤8 replies are the HID reports. The
+`decode_sxuptp_pcap.py` tool flags both. Alternative (no capture): keep tracing
+the data pump (`0x306xxx` callers of `0x3041e0`) and the class-driver open path.
 
 ## Transport map (Milestone 1 — confirmed)
 
