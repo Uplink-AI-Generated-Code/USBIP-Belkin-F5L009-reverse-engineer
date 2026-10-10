@@ -34,9 +34,9 @@ interrupt / isochronous), and session ("job") lifecycle. See
 
 ## Milestones
 
-1. **Transport map** — find the listen sockets and ports: the UDP discovery/ALC
-   channel and the TCP data channel(s). Confirm Silex's typical port 19540.
-   Deliverable: ports + which handler owns each socket.
+1. ~~**Transport map**~~ — **DONE**: SXUPTP = **port 19540** on **TCP** (data/
+   `SXUPTPD`, accept-demuxed at `0x2FF410` → `sub_00302948`) and **UDP**
+   (discovery/ALC). Matches IANA `sxuptp` 19540. See `SXUPTP_PROTOCOL.md`.
 2. **Framing & opcodes** — fully decode the packet header and enumerate the
    RuleNo/opcode set from the `SXUPTPD` dispatch. (ALC header already known:
    `u16 len, u16 rule`, big-endian.)

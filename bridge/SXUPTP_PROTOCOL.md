@@ -17,6 +17,35 @@ client. Three code layers are visible in the firmware:
 - **`VP_SXUP` / `USBUPTP`** — the USB virtualization layer: endpoint I/O
   (`intr-in`, `Isoc remain data`), device/descriptor handling, sub-driver bind.
 
+## Transport map (Milestone 1 — confirmed)
+
+SXUPTP uses **port 19540** (`0x4C54`) on **both TCP and UDP** — matching the IANA
+registration of `sxuptp` (TCP+UDP 19540, since 2002). Confirmed in firmware at
+three sites that load the constant `0x00004C54`:
+
+| Channel | Transport | Role | Evidence (RAM addr) |
+|---|---|---|---|
+| Data / "job" | **TCP 19540** | per-connection SXUPTP session (`SXUPTPD`) | accept demux `0x2FF410` (port==19540 → `sub_00302948`); handler `0x302DA6` stores 19540 into conn struct `+0x2C` and logs `Open(Req) from %I` |
+| Discovery / ALC | **UDP 19540** | datagram discovery / allocation / keepalive | `0x303090` builds a sockaddr on port 19540 and `sendto`s via `sub_0031AE5C`; `SXUP_ALC` recv task `0x308464` reads datagrams |
+
+The **TCP listener multiplexes by port**: in the accept handler (`0x2FF410`),
+port 19540 → SXUPTP (`sub_00302948`), port 80 → HTTP (checked immediately after).
+This corroborates the mapping (HTTP is known to be on 80).
+
+### Transport / socket API (provisional names)
+
+| Addr | Role |
+|---|---|
+| `sub_00302948` | **SXUPTP TCP connection setup/dispatch** (entry for an accepted :19540 conn) — Milestone 2 target |
+| `sub_00302924` | SXUPTP connection teardown/helper |
+| `sub_0031AE5C` | UDP `sendto` (discovery replies) |
+| `sub_0031AFAC` / `sub_0031ACD8` | datagram/stream `recv` |
+| `sub_00334B6C` | TCB operation (listen/queue) |
+| `sub_00335210` | tick / millisecond timer (used for `*10[msec]` timeouts) |
+
+Connection/job struct (pointed by `r4` in the handler): port at `+0x2C`,
+peer-IP/context around `+0x28`, state at `+0x04`.
+
 ## Confirmed so far
 
 ### ALC receive framing (from `sub_00308464`, the "Recv task")
@@ -51,10 +80,10 @@ port (milestone 1).
 
 ## Open questions (next RE targets)
 
-1. **Ports** — which UDP port the ALC channel binds, which TCP port `SXUPTPD`
-   listens on. Hypothesis: Silex uses **19540**; confirm from the socket setup.
-2. **Opcode table** — enumerate RuleNo values and their meaning from the
-   `SXUPTPD` dispatch at `~0x302xxx` (`Open(Req)` handler).
+1. ~~**Ports**~~ — DONE (Milestone 1): TCP+UDP **19540**.
+2. **Opcode table** — enumerate RuleNo values and their meaning from the TCP
+   connection dispatch `sub_00302948` (accepted :19540 conn) and the `SXUPTPD`
+   handler at `~0x302xxx`. ← **next (Milestone 2)**
 3. **Job state machine** — the `suj_state` transitions (OPEN/…/CLOSEREQ) and the
    attach handshake a client must perform.
 4. **USB transfer encoding** — how `VP_SXUP`/`USBUPTP` frames descriptors, setup
