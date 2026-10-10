@@ -515,6 +515,46 @@ Implemented and self-tested in `sxuptp.protocol` (`control_read` now sends
 `pack_disconnect`) and driven by `SxuptpClient.attach()` + `control_transfer()`.
 CLI: `python3 -m bridge.sxuptp.probe getdesc 192.168.2.3 --client-ip 192.168.2.50`.
 
+## ⚠️ Interrupt (HID) endpoints — enumerate but input not yet delivered
+
+Control and bulk work; **interrupt-IN input (keyboard keypresses) does not flow
+yet**, and the cause is a firmware mechanism we have mapped but not activated.
+
+What was confirmed live (SONiX keyboard `0c45:8603`, devId 4, with the user
+actively pressing keys):
+- It **enumerates fully** — a real Linux kernel registered the keyboard +
+  consumer-control + system-control HID interfaces, correct low speed.
+- **No key report is ever delivered** under any client behaviour tried: fast
+  re-polling of the interrupt endpoint (`bulk_read` on `0x81` and `0x82`, 100
+  polls/30s), a single armed read then listen, and listening on **all three
+  sockets** (TCP data channel + UDP `:19540` grant + UDP session) for 30s. Zero
+  bytes on every channel. Sending SET_CONFIGURATION, SET_IDLE, SET_PROTOCOL and
+  SET_INTERFACE first changed nothing.
+
+Firmware model (from the disassembly):
+- Interrupt IN is **queue-based and async**, not request/response. A data-channel
+  read for an interrupt endpoint is dispatched (`sb==2` at `0x3042e0`) to a
+  handler (`0x304574`) that only **checks a per-endpoint queue**; if empty it logs
+  `?VP_SXUP: Intr-IN canncel<NoData>` and unlinks the waiter (`0x3374b0`) — it
+  does **not** submit a USB poll. So client reads never start polling.
+- A background **interrupt class driver** is registered at init
+  (`sub_0030775x`): an ops table of 6 handlers at the literal pool `0x307880`
+  — `0x305d58`, `0x30411c`, submit `0x305e20` (the `(Pin)/(Pout)` poll + `Res_Que
+  Insert`), complete `0x305b74`, `0x3072c0`, `0x30409c` — plus a buffer and a
+  task (`sub_003201E0`/`sub_0032AB5C`). Endpoint poll interval is `ep[0x34]`
+  (`PollIntvl`).
+- So some **activation** (the class driver's open/probe, or an explicit SXUPTP
+  "open interrupt pipe" message) must run to make the firmware start submitting
+  USB interrupt INs to the device and buffering reports into the queue for our
+  job. That trigger is the missing piece; nothing we send reaches it.
+
+To finish this, the efficient unlock is a **packet capture of the official
+driver / Control Center software doing keyboard I/O** (Wireshark on UDP+TCP
+19540), which would show the activation + report messages directly. Otherwise it
+needs deeper RE of the data pump (`0x306xxx`, the many callers of `0x3041e0`) and
+the class-driver open path to find the activation message. The architecture above
+is the map for either route.
+
 ## Transport map (Milestone 1 — confirmed)
 
 SXUPTP uses **port 19540** (`0x4C54`) on **both TCP and UDP** — matching the IANA
