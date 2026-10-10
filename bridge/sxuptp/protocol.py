@@ -15,10 +15,26 @@ from dataclasses import dataclass, field
 
 PORT = 19540  # CONFIRMED: TCP + UDP (IANA "sxuptp"), firmware constant 0x4C54
 
-# --- discovery / ALC datagram (UDP 19540) -------------------------------
-# CONFIRMED header: {u16 length, u16 rule}, big-endian. Rule is a 2-char tag.
-RULE_BS = 0x4253  # "BS" — broadcast search / discovery request (CONFIRMED tag)
-RULE_BB = 0x4242  # "BB" — discovery/announce variant (CONFIRMED tag)
+# --- UDP control protocol (port 19540) ----------------------------------
+# CONFIRMED against hardware: request starts with a big-endian u16 command.
+# Reply framing: {u16 cmd_echo, u16 status, u16 _, u16 length, body[length]}.
+# Commands 0,5,6,7,8 -> "ERR(NOT SUPPORTED)"; 1,2,3,4 recognized (bodies TBD);
+# 4 is special. The valid request bodies for 1-4 are not yet known.
+#
+# NOTE: the "BS"/"BB" ASCII tags from the SXUP_ALC code path are NOT this
+# protocol; live testing showed UDP 19540 uses numeric commands.
+
+def unpack_udp_reply(buf: bytes):
+    """Parse a UDP control reply header -> (command, status, length, body)."""
+    if len(buf) < 8:
+        raise ValueError("short UDP reply")
+    cmd, status, _resv, length = struct.unpack_from(">HHHH", buf, 0)
+    return cmd, status, length, buf[8:8 + length]
+
+
+def pack_udp_command(command: int, body: bytes = b"") -> bytes:
+    """Build a UDP control request: u16 command + body (body format TBD)."""
+    return struct.pack(">H", command) + body
 
 # --- data channel (TCP 19540) message type ------------------------------
 # CONFIRMED: type u16 = (dir << 8) | category
@@ -114,15 +130,6 @@ class Message:
         return m
 
 
-def pack_discovery(rule: int = RULE_BS, body: bytes = b"\x00\x00\x00\x00") -> bytes:
-    """
-    Build a discovery datagram. CONFIRMED header {u16 length, u16 rule}; the
-    device validated length==4 for the "BS" request. The body contents are
-    INFERRED (the client->device search payload was not reversed).
-    """
-    return struct.pack(">HH", len(body), rule) + body
-
-
 def _selftest() -> None:
     # round-trip a control GET_DESCRIPTOR(device) message
     s = Setup.get_descriptor(desc_type=1, desc_index=0, length=18)
@@ -136,9 +143,11 @@ def _selftest() -> None:
     assert back.category == CAT_CONTROL and back.setup == s, back
     # type model
     assert make_type(CAT_ISOC, DIR_RESPONSE) == 0x8004
-    # discovery framing
-    d = pack_discovery()
-    assert d[:4] == bytes.fromhex("0004" "4253"), d[:4].hex()
+    # UDP control reply parse (shape confirmed against hardware)
+    sample = bytes.fromhex("0000000000000018") + b"ERR(NOT SUPPORTED)\x00" + b"\x00"*7
+    cmd, status, length, body = unpack_udp_reply(sample)
+    assert cmd == 0 and length == 0x18 and body.startswith(b"ERR(NOT SUPPORTED)"), (cmd, length, body)
+    assert pack_udp_command(4) == bytes.fromhex("0004")
     print("protocol selftest: OK")
 
 

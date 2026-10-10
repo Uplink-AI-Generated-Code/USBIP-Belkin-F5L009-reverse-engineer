@@ -10,8 +10,8 @@ F5L009  ──SXUPTP/IP──▶  bridge daemon  ──USB/IP (TCP 3240)──�
                         └─ usbip server   (documented protocol)
 ```
 
-Approach chosen: **static reverse engineering** of the firmware (we have both
-images fully reconstructed), no live packet capture. Target: a **usbipd-style
+Approach: **static RE** of the firmware, now cross-checked against the **live
+device** at 192.168.2.3 (no client/capture available). Target: a **usbipd-style
 exporter**.
 
 ## What we already have

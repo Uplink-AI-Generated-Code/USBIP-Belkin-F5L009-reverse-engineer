@@ -24,8 +24,8 @@ def hexdump(b: bytes) -> str:
 
 def cmd_dry_run() -> int:
     print(f"SXUPTP port: {p.PORT} (TCP+UDP)")
-    disc = p.pack_discovery(p.RULE_BS)
-    print(f"\ndiscovery 'BS' datagram ({len(disc)} B):\n  {hexdump(disc)}")
+    disc = p.pack_udp_command(1)
+    print(f"\nUDP control command 1 ({len(disc)} B):\n  {hexdump(disc)}")
     setup = p.Setup.get_descriptor(desc_type=1, desc_index=0, length=18)
     msg = p.Message(category=p.CAT_CONTROL, endpoint=0x00, setup=setup)
     raw = msg.pack()
@@ -38,8 +38,8 @@ def cmd_dry_run() -> int:
 
 
 def cmd_discover(broadcast: str) -> int:
-    print(f"broadcasting 'BS' on UDP {p.PORT} to {broadcast} ...")
-    replies = SxuptpClient.discover(broadcast=broadcast)
+    print(f"sending UDP control command 1 on {p.PORT} to {broadcast} ...")
+    replies = SxuptpClient.discover(command=1, target=broadcast)
     if not replies:
         print("no replies (no device, or discovery body/format needs adjustment)")
         return 1

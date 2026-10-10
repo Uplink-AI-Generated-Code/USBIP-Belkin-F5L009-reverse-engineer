@@ -17,6 +17,50 @@ client. Three code layers are visible in the firmware:
 - **`VP_SXUP` / `USBUPTP`** — the USB virtualization layer: endpoint I/O
   (`intr-in`, `Isoc remain data`), device/descriptor handling, sub-driver bind.
 
+## Live device findings (CONFIRMED against hardware)
+
+Validated against the real F5L009 at `192.168.2.3` (MAC `00:1C:DF:11:CB:6D`,
+Belkin OUI; host `BK11CB6D`).
+
+- **Open ports**: TCP **21** (FTP), **23** (Telnet/DISH, telnet-negotiates then
+  wants a login), **80** (web UI, `Server: JC-HTTPD/1.16.22` — matches RE),
+  **19540** (SXUPTP). UDP **19540** bound (RE-confirmed: `socket()`+`bind(0x4C54)`
+  in the SXUPTPD init).
+- **Attached USB device** (from `/en/status/devstat.htm`): a SONiX **"SI Gaming
+  Keyboard"**, **Low Speed** HID, status **"Not Connected"** (available to claim)
+  — an ideal simple bridge target (control + one interrupt-IN endpoint).
+- **TCP 19540 RSTs in ~0 ms** on connect unless a job is pre-allocated — so the
+  UDP control exchange is a hard prerequisite (no TCP-only attach).
+
+### UDP control protocol (port 19540) — framing CONFIRMED
+
+Request starts with a **numeric big-endian `u16` command** (`ntohs(data[0:2])`),
+**not** an ASCII tag. Reply framing, observed live:
+
+```
++0x00 u16 command   (echoes the request command)
++0x02 u16 status?   (0 in error replies)
++0x04 u16 ?         (0)
++0x06 u16 length    (body length)
++0x08 u8[length]    body
+```
+
+Observed command results (live):
+
+| command | result |
+|---|---|
+| 0, 5, 6, 7, 8 | reply body `"ERR(NOT SUPPORTED)"` — unknown command |
+| 1, 2, 3, 4 | **recognized** (no error reply with an empty/zero body); `4` is special (firmware branches on `cmp cmd,#4`, references `127.0.0.1`) |
+
+The valid request **bodies** for commands 1–4 (discovery / device-list / open /
+allocate-job) are not yet known — they produced no reply to zero-filled bodies,
+and fuzzing them risks changing device state. This is the remaining blocker.
+
+> **Correction:** the earlier `"BS"`/`"BB"` ASCII tags came from the separate
+> `SXUP_ALC` code path and are **not** the UDP-19540 control command format;
+> live testing showed that socket uses numeric commands. A good example of
+> hardware validation correcting a static-RE inference.
+
 ## Transport map (Milestone 1 — confirmed)
 
 SXUPTP uses **port 19540** (`0x4C54`) on **both TCP and UDP** — matching the IANA
