@@ -84,12 +84,69 @@ per-message **sequence/transaction counter** (`sub_00303C00` global, incremented
 each message), a timestamp, a connection id at `+0x48`, and a flag at `+0x4C`,
 then queued/sent via `sub_003039CC(port, 1, buf+8, 0x40)`.
 
-### Still open — the TCP USB-transfer wire format
+### TCP data-channel message frame — DECODED (from `sub_0030481C`)
 
-The per-endpoint transfer encoding (control/bulk/interrupt/isoc) lives in the
-callback-driven `VP_SXUP`/`USBUPTP` layer and is **not yet decoded**. This is the
-crux for URB translation and is the hard remainder of Milestones 2+4. See
-"Limits of static RE" below.
+`sub_0030481C` is the SXUPTP message parser on the TCP data channel. It copies a
+**24-byte (`0x18`) big-endian header** off the stream (`sub_0032CD2C`) and parses
+it with `ntohs`/`ntohl` (`get_le16`+`bswap16` = `0x3362C4`/`0x33628C`; 32-bit via
+`0x3362E0`/`0x33629C`).
+
+Wire header (offsets confirmed from the parse order; field *names* inferred):
+
+```
++0x00  u16  type        message type / function
++0x02  u16  tag         transfer tag / handle (inferred)
++0x04  u16  field2      (inferred)
++0x06  u8   flags
++0x07  u8   endpoint    low nibble = EP number; bit7 = direction (IN)
++0x08  u16  field3
++0x0A  ...              (header is 0x18 bytes total)
++0x0C  ...              for a control request: USB SETUP packet (see below)
+```
+
+**`type` values** (dispatched at `0x3048F8`+ and `0x304AEA`+): low categories
+**1, 2, 3, 4**, each with a **`| 0x8000` variant** (0x8001–0x8004). The `0x8000`
+bit distinguishes response / data-in direction from the request form.
+Confidence: header size and big-endianness **high**; exact per-type semantics
+**medium** (1 = control, confirmed below; 2/3/4 = bulk/interrupt/isoc + cancel,
+inferred from the `VP_SXUP` transfer strings).
+
+**Control transfer (type 1)** — the body carries a verbatim 8-byte **USB SETUP**
+packet at header `+0x0C`, read field-for-field and submitted via
+`sub_0031EF2C`:
+
+```
++0x0C u8   bmRequestType
++0x0D u8   bRequest
++0x0E u16  wValue   (BE)
++0x10 u16  wIndex   (BE)
++0x12 u16  wLength  (BE)
+```
+
+Confidence: **high** — the `ldrb/ldrb/get_le16/get_le16/get_le32` sequence onto a
+setup structure is unmistakable.
+
+**Transfer outcomes** (logged by the `VP_SXUP` endpoint handlers, → USB/IP URB
+status): `<SCS>` success, `<STL>` stall, `<NAK T/O>` timeout, `<RETRY>`, `<ERR>`,
+plus `Cancel pkt received`. Unknown `type` → logs `#VP_SXUP: Unknown function<%x>`
+and replies `-ERR_HDR-` (`sub_0031E414`).
+
+### Key functions (data path)
+
+| Addr | Role |
+|---|---|
+| `sub_0030481C` | **SXUPTP TCP message parser / dispatcher** |
+| `sub_0032CD2C` | copy N bytes off the stream buffer (header/body extract) |
+| `sub_0031EF2C` | submit **control** transfer (consumes the SETUP packet) |
+| `sub_0031E414` | reject / send `-ERR_HDR-` |
+| `sub_00304174` | per-transfer job setup (type 1 path) |
+
+### Still open
+
+- Exact semantics of `type` 2/3/4 and the `0x8000` responses (bulk vs
+  interrupt vs isoc; data framing / lengths).
+- The discovery *reply* body (device/port enumeration) the client parses to pick
+  a device id (the `conn+0x64` value used at attach).
 
 ## Confirmed so far
 
