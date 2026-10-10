@@ -45,16 +45,42 @@ Request starts with a **numeric big-endian `u16` command** (`ntohs(data[0:2])`),
 +0x08 u8[length]    body
 ```
 
-Observed command results (live):
+This is the **JCP** protocol (`sub_0032FE14`; firmware logs `?JCP: UNKNOWN JCP`).
+`command = ntohs(req[0:2])`, `subcommand = ntohs(req[2:4])`:
 
-| command | result |
+| command | meaning |
 |---|---|
-| 0, 5, 6, 7, 8 | reply body `"ERR(NOT SUPPORTED)"` — unknown command |
-| 1, 2, 3, 4 | **recognized** (no error reply with an empty/zero body); `4` is special (firmware branches on `cmp cmd,#4`, references `127.0.0.1`) |
+| 1, 2, 3 | get/set a **named JCP config variable** — ASCII name at `req[4:]`, matched against a name table (`sub_0032FDD0`, table @`0x2F51D8`). Silent if the name is unknown. |
+| **4 / subcmd `0x9506`** | **device identity / discovery** (`sub_002FA5D0`) — CONFIRMED live |
+| else | `"ERR(NOT SUPPORTED)"` |
 
-The valid request **bodies** for commands 1–4 (discovery / device-list / open /
-allocate-job) are not yet known — they produced no reply to zero-filled bodies,
-and fuzzing them risks changing device state. This is the remaining blocker.
+### Discovery — WORKING (confirmed byte-for-byte on hardware)
+
+Request: `00 04 95 06` (cmd=4, subcmd=0x9506) to UDP 19540. Reply is 166 bytes:
+
+| offset | field | live value |
+|---|---|---|
+| `0x00` u16 | reply code | `0x0002` |
+| `0x02` u16 | subcmd echo | `0x9506` |
+| `0x24` char[16] | model | `"Network USB Hub"` |
+| `0x38` u8[6] | **MAC** | `00:1C:DF:11:CB:6D` |
+| `0x42` u8[4] | **IP** | `192.168.2.3` |
+| `0x48` char | JCP version | `"Ver 2.2.0"` |
+| `0x54` char[32] | **attached USB device** | `"SONiX SI Gaming Keyboard"` |
+| `0x74` char | hostname | `"BK11CB6D"` |
+| `0x84` char[32] | firmware | `"1.2.0"` |
+
+Implemented and verified in `sxuptp/protocol.py` (`pack_identify` /
+`parse_identity`) and `sxuptp` discover.
+
+### Remaining blocker — attach / job allocation
+
+Discovery works, but the command that moves a job to `OPEN_WAIT` (so TCP 19540
+accepts the data channel) is still unidentified — it is likely a JCP **set** on a
+named variable (command 2/3) whose name table wasn't captured in our RAM snapshot
+(registered after emulation stopped). Candidates to reverse next: the JCP var
+names, or trace what sets a job's state field to 2. Fuzzing the live `set` path
+risks changing device state, so this wants care or a capture.
 
 > **Correction:** the earlier `"BS"`/`"BB"` ASCII tags came from the separate
 > `SXUP_ALC` code path and are **not** the UDP-19540 control command format;

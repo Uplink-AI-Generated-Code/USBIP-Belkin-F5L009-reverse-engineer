@@ -32,10 +32,10 @@ python3 -m bridge.sxuptp.probe getdesc 192.168.1.50     # attach + GET_DESCRIPTO
 |---|---|
 | Port 19540, discovery/control framing, SETUP | **implemented, matches RE** |
 | `protocol` round-trip self-test | **passing** |
-| `discover()` send | implemented; **reply parsing** returns raw bytes (format not RE'd) |
+| `discover()` (JCP cmd4/0x9506) | **working, confirmed on live device** — returns parsed model/MAC/IP/USB-device/fw |
 | `attach()` | **NotImplementedError** — OPEN request body unknown |
 | `control_transfer()` response length | **inferred** (assumes `wLength` data back) |
-| Tested against hardware | **no** — static-RE-only so far |
+| Tested against hardware | **discovery: yes** (192.168.2.3); attach/transfers: not yet |
 
 ## What unblocks the rest
 

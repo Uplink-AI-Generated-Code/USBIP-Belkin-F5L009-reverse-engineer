@@ -44,9 +44,9 @@ interrupt / isochronous), and session ("job") lifecycle. See
 4. (started) **USB transfer encoding** — control fully decoded; categories 2/3/4
    identified and routed to one data engine (bulk/interrupt/isoc assignment still
    inferred). Remaining: exact payload chunking + endpoint-type mapping.
-3. **Attach handshake** — reverse `?SXUPTPD: Open(Req)`, the `suj_state` job
-   state machine (OPEN → … → CLOSEREQ), and what a client must send to claim a
-   device.
+3. **Attach handshake** — discovery (JCP cmd4/0x9506) DONE + confirmed live. Still
+   open: the command that allocates a job to OPEN_WAIT so TCP 19540 accepts the
+   data channel (likely a JCP set-variable; name table not yet captured).
 5. (started) **Protocol library** — `bridge/sxuptp/` implements the confirmed
    framing (port, discovery, 24-byte header, control SETUP) with a passing
    self-test and a `--dry-run` probe. Stubbed: `attach()` (OPEN body unknown) and

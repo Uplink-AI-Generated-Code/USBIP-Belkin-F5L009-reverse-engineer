@@ -36,6 +36,41 @@ def pack_udp_command(command: int, body: bytes = b"") -> bytes:
     """Build a UDP control request: u16 command + body (body format TBD)."""
     return struct.pack(">H", command) + body
 
+
+# JCP commands (UDP 19540), CONFIRMED against hardware:
+JCP_IDENTIFY = 4          # with subcommand 0x9506 -> device identity/discovery
+JCP_IDENTIFY_SUB = 0x9506
+
+
+def pack_identify() -> bytes:
+    """Discovery/identity request (CONFIRMED live): cmd=4, subcmd=0x9506."""
+    return struct.pack(">HH", JCP_IDENTIFY, JCP_IDENTIFY_SUB)
+
+
+def _cstr(buf: bytes, off: int) -> str:
+    end = off
+    while end < len(buf) and 0x20 <= buf[end] < 0x7F:
+        end += 1
+    return buf[off:end].decode("latin1")
+
+
+def parse_identity(buf: bytes) -> dict:
+    """
+    Parse a cmd4/0x9506 identity reply. Field offsets CONFIRMED byte-for-byte
+    against the live F5L009 (166-byte reply).
+    """
+    if len(buf) < 0xA6 or struct.unpack_from(">H", buf, 2)[0] != JCP_IDENTIFY_SUB:
+        raise ValueError("not a JCP identity reply")
+    return {
+        "model": _cstr(buf, 0x24),
+        "mac": buf[0x38:0x3E].hex(":"),
+        "ip": ".".join(str(x) for x in buf[0x42:0x46]),
+        "proto_version": _cstr(buf, 0x48),      # e.g. "Ver 2.2.0"
+        "usb_device": _cstr(buf, 0x54),         # attached USB device name
+        "hostname": _cstr(buf, 0x74),
+        "firmware": _cstr(buf, 0x84),
+    }
+
 # --- data channel (TCP 19540) message type ------------------------------
 # CONFIRMED: type u16 = (dir << 8) | category
 DIR_REQUEST = 0x00   # host -> device
@@ -148,6 +183,17 @@ def _selftest() -> None:
     cmd, status, length, body = unpack_udp_reply(sample)
     assert cmd == 0 and length == 0x18 and body.startswith(b"ERR(NOT SUPPORTED)"), (cmd, length, body)
     assert pack_udp_command(4) == bytes.fromhex("0004")
+    assert pack_identify() == bytes.fromhex("00049506")
+    # identity reply parse vs the captured live bytes
+    ident = bytes.fromhex(
+        "000295060000000000000000000000000000000000000000000000000000000000000000"
+        "4e6574776f726b20555342204875620000000000001cdf11cb6d00000000c0a8020300005665"
+        "7220322e322e30008081534f4e69582053492047616d696e67204b6579626f61726400000000"
+        "00000000424b3131434236440000000000000000312e322e3000000000000000000000000000"
+        "00000000000000000000000000000000")
+    info = parse_identity(ident)
+    assert info["mac"] == "00:1c:df:11:cb:6d" and info["ip"] == "192.168.2.3", info
+    assert info["usb_device"] == "SONiX SI Gaming Keyboard" and info["firmware"] == "1.2.0", info
     print("protocol selftest: OK")
 
 

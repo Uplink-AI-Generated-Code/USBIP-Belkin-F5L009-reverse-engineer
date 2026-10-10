@@ -24,8 +24,8 @@ def hexdump(b: bytes) -> str:
 
 def cmd_dry_run() -> int:
     print(f"SXUPTP port: {p.PORT} (TCP+UDP)")
-    disc = p.pack_udp_command(1)
-    print(f"\nUDP control command 1 ({len(disc)} B):\n  {hexdump(disc)}")
+    disc = p.pack_identify()
+    print(f"\nJCP identity/discovery request ({len(disc)} B):\n  {hexdump(disc)}")
     setup = p.Setup.get_descriptor(desc_type=1, desc_index=0, length=18)
     msg = p.Message(category=p.CAT_CONTROL, endpoint=0x00, setup=setup)
     raw = msg.pack()
@@ -38,13 +38,15 @@ def cmd_dry_run() -> int:
 
 
 def cmd_discover(broadcast: str) -> int:
-    print(f"sending UDP control command 1 on {p.PORT} to {broadcast} ...")
-    replies = SxuptpClient.discover(command=1, target=broadcast)
-    if not replies:
-        print("no replies (no device, or discovery body/format needs adjustment)")
+    print(f"JCP identity query (cmd4/0x9506) on UDP {p.PORT} to {broadcast} ...")
+    devs = SxuptpClient.discover(target=broadcast)
+    if not devs:
+        print("no devices found")
         return 1
-    for ip, data in replies:
-        print(f"\nreply from {ip} ({len(data)} B):\n  {hexdump(data)}")
+    for d in devs:
+        print(f"\n  {d['from']}  {d['model']}  mac={d['mac']}  fw={d['firmware']}")
+        print(f"    proto={d['proto_version']}  host={d['hostname']}")
+        print(f"    USB device: {d['usb_device']!r}")
     return 0
 
 

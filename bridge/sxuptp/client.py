@@ -24,30 +24,36 @@ class SxuptpClient:
 
     # --- discovery (UDP 19540) ------------------------------------------
     @staticmethod
-    def discover(command: int = 1, body: bytes = b"", target: str = "255.255.255.255",
-                 port: int = p.PORT, timeout: float = 2.0) -> list[tuple[str, bytes]]:
-        """Send a UDP control command and collect raw replies as (ip, payload).
+    def discover(target: str = "255.255.255.255", port: int = p.PORT,
+                 timeout: float = 2.0, src: str = "") -> list[dict]:
+        """Discover devices via the JCP identity query (cmd4/0x9506).
 
-        CONFIRMED (hardware): request = big-endian u16 command on UDP 19540;
-        reply = {u16 cmd, u16 status, u16 _, u16 length, body}. Commands 0/5/6/7/8
-        return "ERR(NOT SUPPORTED)"; the valid bodies for 1-4 are still unknown,
-        so this returns raw replies for inspection.
+        CONFIRMED against hardware: returns parsed device info dicts (model, mac,
+        ip, proto_version, usb_device, hostname, firmware). Send to a broadcast
+        or a unicast IP.
         """
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        if src:
+            s.bind((src, port))
         s.settimeout(timeout)
         try:
-            s.sendto(p.pack_udp_command(command, body), (target, port))
-            replies: list[tuple[str, bytes]] = []
+            s.sendto(p.pack_identify(), (target, port))
+            found: list[dict] = []
             t0 = time.time()
             while time.time() - t0 < timeout:
                 try:
                     data, addr = s.recvfrom(2048)
                 except socket.timeout:
                     break
-                replies.append((addr[0], data))
-            return replies
+                try:
+                    info = p.parse_identity(data)
+                    info["from"] = addr[0]
+                    found.append(info)
+                except ValueError:
+                    pass
+            return found
         finally:
             s.close()
 
