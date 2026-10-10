@@ -73,7 +73,27 @@ Request: `00 04 95 06` (cmd=4, subcmd=0x9506) to UDP 19540. Reply is 166 bytes:
 Implemented and verified in `sxuptp/protocol.py` (`pack_identify` /
 `parse_identity`) and `sxuptp` discover.
 
-### Remaining blocker — attach / job allocation
+### JCP config command set (commands 1/2/3) — from firmware
+
+The named variables matched by commands 1/2/3 come from a static table
+(`sub_0032FF1C` merges it into `0x2F51D8`; source table @`0x0033A4CC`). These are
+**config/management** operations, not USB attach:
+
+```
+GET CONTEXT        GET MENU_DATA        GET ENUM_DATA      GET EEP_DATA
+SET DEFAULT        SAVE EEP_DATA        POLLING            SET IP_ADDR
+CHK PASSWORD       EXEC REBOOT SYSTEM   EXEC REBOOT LOADER
+EXEC PRINT DIAGNOSTIC    EXEC PRINT CONFIGDATA    EXEC CLEAR EEP_DATA
+```
+
+The request carries the ASCII name at `req[4:]`. **Safety:** `EXEC REBOOT *`,
+`SET DEFAULT`, `SET IP_ADDR`, `SAVE/CLEAR EEP_DATA` change or wipe device state —
+never send these while probing; only `GET *` / `POLLING` are read-only.
+
+**Conclusion:** JCP has no "connect USB device" verb — device attach is handled
+by the separate **SXUPTPD** job path, not JCP.
+
+### Remaining blocker — attach / job allocation (SXUPTPD, not JCP)
 
 Discovery works, but the command that moves a job to `OPEN_WAIT` (so TCP 19540
 accepts the data channel) is still unidentified — it is likely a JCP **set** on a
