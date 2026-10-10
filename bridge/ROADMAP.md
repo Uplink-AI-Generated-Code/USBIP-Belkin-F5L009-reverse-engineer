@@ -37,9 +37,10 @@ interrupt / isochronous), and session ("job") lifecycle. See
 1. ~~**Transport map**~~ — **DONE**: SXUPTP = **port 19540** on **TCP** (data/
    `SXUPTPD`, accept-demuxed at `0x2FF410` → `sub_00302948`) and **UDP**
    (discovery/ALC). Matches IANA `sxuptp` 19540. See `SXUPTP_PROTOCOL.md`.
-2. **Framing & opcodes** — fully decode the packet header and enumerate the
-   RuleNo/opcode set from the `SXUPTPD` dispatch. (ALC header already known:
-   `u16 len, u16 rule`, big-endian.)
+2. **Framing & opcodes** — *partial*: discovery (UDP) framing + opcodes `"BS"`/
+   `"BB"` done, and the TCP attach/open flow mapped. **Remaining**: the TCP
+   USB-transfer wire format in `VP_SXUP` (callback-driven; see SXUPTP_PROTOCOL.md
+   "Limits of static RE"). This is the hard core and merges with Milestone 4.
 3. **Attach handshake** — reverse `?SXUPTPD: Open(Req)`, the `suj_state` job
    state machine (OPEN → … → CLOSEREQ), and what a client must send to claim a
    device.

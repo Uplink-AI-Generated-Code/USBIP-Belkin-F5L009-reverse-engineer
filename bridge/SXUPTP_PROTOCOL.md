@@ -46,6 +46,51 @@ This corroborates the mapping (HTTP is known to be on 80).
 Connection/job struct (pointed by `r4` in the handler): port at `+0x2C`,
 peer-IP/context around `+0x28`, state at `+0x04`.
 
+## Framing & opcodes (Milestone 2 — partial)
+
+### Discovery / ALC opcodes (UDP 19540) — confirmed
+
+Datagram header is `{u16 length, u16 rule}` big-endian (via `ntohs`). The rule is
+a **2-character ASCII tag**; two are compared in the discovery code:
+
+| Rule | Hex | Where | Meaning (inferred) |
+|---|---|---|---|
+| `"BS"` | `0x4253` | `0x308508` (ALC recv task) | broadcast search / discovery request |
+| `"BB"` | `0x4242` | `0x3091F8` | discovery/announce variant |
+
+These are the only ASCII-tag comparisons in the SXUPTP region, so the discovery
+vocabulary is small. The first field was validated `== 4` for the `"BS"` packet
+(a fixed body length for that request).
+
+### Attach / open flow (TCP 19540) — confirmed (overlaps Milestone 3)
+
+`sub_00302948` (entry for an accepted :19540 connection) matches the connection
+to a **pre-allocated job**:
+
+- Job table: base `0x2F00A0`, count at `0x2F00C0`, **stride `0xE8`** per job.
+- Match criterion: `job[+0]!=0` AND `job[+4]==2` (OPEN_WAIT) AND
+  `job[+0x28] == conn[+0x64]` (the device/port id the client asked for).
+- On match: job state `[+4] 2→4` (active), bind TCP conn at `job[+0xC]`, set
+  socket opts (`sub_0031592C`, `sub_0031A2B8(conn,5)`), log `Open job[%lx/%s]`
+  and `Open[%lx] from %I:%d`, then start the data pump (`sub_0030817C` /
+  `sub_00303F90`).
+- So a client must first get a job into OPEN_WAIT (via UDP discovery/allocation),
+  then TCP-connect; the id at `conn+0x64` selects which USB device.
+
+### Message records — partial
+
+Outbound messages are built as ~`0x40`-byte job records (`sub_00303C70`) with a
+per-message **sequence/transaction counter** (`sub_00303C00` global, incremented
+each message), a timestamp, a connection id at `+0x48`, and a flag at `+0x4C`,
+then queued/sent via `sub_003039CC(port, 1, buf+8, 0x40)`.
+
+### Still open — the TCP USB-transfer wire format
+
+The per-endpoint transfer encoding (control/bulk/interrupt/isoc) lives in the
+callback-driven `VP_SXUP`/`USBUPTP` layer and is **not yet decoded**. This is the
+crux for URB translation and is the hard remainder of Milestones 2+4. See
+"Limits of static RE" below.
+
 ## Confirmed so far
 
 ### ALC receive framing (from `sub_00308464`, the "Recv task")
@@ -88,6 +133,24 @@ port (milestone 1).
    attach handshake a client must perform.
 4. **USB transfer encoding** — how `VP_SXUP`/`USBUPTP` frames descriptors, setup
    packets, and bulk/interrupt/isoc data.
+
+## Limits of static RE (read before continuing)
+
+Milestones 1 and the discovery/attach half of 2 came out cleanly because they
+hinge on constants and strings. The **TCP USB-transfer framing does not** — it is
+dispatched through registered socket callbacks over a job/queue RTOS layer, so
+reconstructing the exact wire bytes means statically emulating a callback graph.
+That is doable but slow and easy to get subtly wrong.
+
+A **short live packet capture** would resolve it in minutes and is the highest-
+leverage next step if a device + Silex client ever become available:
+- UDP 19540 broadcast → the `"BS"`/`"BB"` discovery exchange (validates framing).
+- One TCP 19540 open + a single control transfer (GET_DESCRIPTOR) → reveals the
+  data-channel header and the USB-request encoding directly.
+
+Until then, static RE can continue on the self-contained pieces: the discovery
+*reply* format (`sub_003039CC` sender) and the `VP_SXUP` endpoint handlers
+(`intr-in`, `Isoc`), building the opcode map incrementally.
 
 ## Method notes
 
