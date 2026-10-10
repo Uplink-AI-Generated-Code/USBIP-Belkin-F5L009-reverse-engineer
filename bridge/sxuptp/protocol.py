@@ -149,7 +149,12 @@ def make_type(category: int, dir_bit: int = DIR_REQUEST) -> int:
 
 @dataclass
 class Setup:
-    """USB control SETUP packet (8 bytes). CONFIRMED layout at header +0x0C."""
+    """
+    SXUPTP control SETUP — a **10-byte** structure at header +0x0C. CONFIRMED by
+    the parser (`sub_0030481C` @0x304CA4): bmRequestType, bRequest, wValue (u16
+    BE), wIndex (u16 BE), **wLength (u32 BE)**. Note wLength is 32-bit here, not
+    the standard USB 16-bit.
+    """
     bmRequestType: int
     bRequest: int
     wValue: int
@@ -157,8 +162,7 @@ class Setup:
     wLength: int
 
     def pack(self) -> bytes:
-        # bm/b are bytes; wValue/wIndex/wLength big-endian u16 (per firmware ntohs)
-        return struct.pack(">BBHHH", self.bmRequestType, self.bRequest,
+        return struct.pack(">BBHHI", self.bmRequestType, self.bRequest,
                            self.wValue, self.wIndex, self.wLength)
 
     @classmethod
@@ -177,7 +181,7 @@ class Message:
 
     The common header (bytes 0x00..0x09) is CONFIRMED by field offset; bytes
     0x0A..0x0B and 0x14..0x17 are reserved/unknown (INFERRED zero). For a control
-    message the SETUP packet occupies 0x0C..0x13.
+    message the 10-byte SETUP occupies 0x0C..0x15 (wLength is u32 BE).
     """
     category: int
     endpoint: int = 0
@@ -200,7 +204,7 @@ class Message:
         if self.category == CAT_CONTROL:
             if self.setup is None:
                 raise ValueError("control message requires a SETUP packet")
-            hdr[0x0C:0x14] = self.setup.pack()
+            hdr[0x0C:0x16] = self.setup.pack()
         return bytes(hdr) + self.data
 
     @classmethod
@@ -215,8 +219,8 @@ class Message:
                 field2=struct.unpack_from(">H", buf, 0x04)[0],
                 flags=buf[0x06], endpoint=buf[0x07],
                 field3=struct.unpack_from(">H", buf, 0x08)[0])
-        if category == CAT_CONTROL and len(buf) >= 0x14:
-            m.setup = Setup(*struct.unpack_from(">BBHHH", buf, 0x0C))
+        if category == CAT_CONTROL and len(buf) >= 0x16:
+            m.setup = Setup(*struct.unpack_from(">BBHHI", buf, 0x0C))
         m.data = buf[HEADER_LEN:]
         return m
 
@@ -224,12 +228,12 @@ class Message:
 def _selftest() -> None:
     # round-trip a control GET_DESCRIPTOR(device) message
     s = Setup.get_descriptor(desc_type=1, desc_index=0, length=18)
-    assert s.pack() == bytes.fromhex("8006" + "0100" + "0000" + "0012"), s.pack().hex()
+    assert s.pack() == bytes.fromhex("8006" + "0100" + "0000" + "00000012"), s.pack().hex()
     m = Message(category=CAT_CONTROL, endpoint=0x00, setup=s)
     raw = m.pack()
     assert len(raw) == HEADER_LEN, len(raw)
     assert struct.unpack_from(">H", raw, 0)[0] == 0x0001  # dir=request, cat=control
-    assert raw[0x0C:0x14] == s.pack()
+    assert raw[0x0C:0x16] == s.pack()
     back = Message.unpack(raw)
     assert back.category == CAT_CONTROL and back.setup == s, back
     # type model

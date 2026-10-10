@@ -270,11 +270,28 @@ A live sweep confirmed the shape: the first control msg → `0001 0000 ffff …`
 immediately sending more messages got empty replies and then closed the channel
 (a rapid malformed follow-up disrupts the in-flight async transfer).
 
-**Next test (one power-cycle):** attach, send a single control `GET_DESCRIPTOR`,
-then **keep reading** the TCP channel for a few seconds to catch the async
-descriptor reply — do not send anything else meanwhile. This is the last step to
-the first real USB round-trip; everything up to and including the live data
-channel is working.
+**Data-channel control SETUP — exact layout DECODED** (`sub_0030481C` @0x304CA4):
+the control body at header `+0x0C` is a **10-byte** structure, not the standard
+8-byte USB SETUP:
+
+```
++0x0C u8   bmRequestType
++0x0D u8   bRequest
++0x0E u16  wValue   (big-endian)
++0x10 u16  wIndex   (big-endian)
++0x12 u32  wLength  (big-endian, 32-bit)   <-- not 16-bit
+```
+
+(`sub_0031EF2C` is the SETUP builder; the URB is submitted via the ARM veneer
+`0x33A008`, and completion is reported via the callback `0x32A735`.)
+
+**Live result with the corrected 10-byte SETUP:** the device parses it and
+fills the URB, but the transfer still completes `0x0001 0000 ffff …` — `0xffff`
+is a USB-level error/failure, not a framing rejection. So the message format is
+correct; the device is refusing the transfer itself. Most likely the SXUPTP
+session needs a **device reset / enumeration step** (or a specific first message)
+before control transfers are honored — runtime USB state that a client capture
+would show directly. This is the remaining piece.
 
 ### How to finish attach (what a capture must show)
 
