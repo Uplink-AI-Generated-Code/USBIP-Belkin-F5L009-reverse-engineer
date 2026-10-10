@@ -37,16 +37,16 @@ interrupt / isochronous), and session ("job") lifecycle. See
 1. ~~**Transport map**~~ — **DONE**: SXUPTP = **port 19540** on **TCP** (data/
    `SXUPTPD`, accept-demuxed at `0x2FF410` → `sub_00302948`) and **UDP**
    (discovery/ALC). Matches IANA `sxuptp` 19540. See `SXUPTP_PROTOCOL.md`.
-2. **Framing & opcodes** — *partial*: discovery (UDP) framing + opcodes `"BS"`/
-   `"BB"` done, and the TCP attach/open flow mapped. **Remaining**: the TCP
-   USB-transfer wire format in `VP_SXUP` (callback-driven; see SXUPTP_PROTOCOL.md
-   "Limits of static RE"). This is the hard core and merges with Milestone 4.
+2. ~~**Framing & opcodes**~~ — **DONE**: discovery opcodes (`"BS"`/`"BB"`), the
+   TCP attach/open flow, and the 24-byte data-channel header with its type model
+   `(dir<<8)|category` (1=control w/ USB SETUP; 2/3/4 = data engine). See
+   SXUPTP_PROTOCOL.md.
+4. (started) **USB transfer encoding** — control fully decoded; categories 2/3/4
+   identified and routed to one data engine (bulk/interrupt/isoc assignment still
+   inferred). Remaining: exact payload chunking + endpoint-type mapping.
 3. **Attach handshake** — reverse `?SXUPTPD: Open(Req)`, the `suj_state` job
    state machine (OPEN → … → CLOSEREQ), and what a client must send to claim a
    device.
-4. **USB transfer encoding** — reverse `VP_SXUP`/`USBUPTP`: how USB descriptors,
-   control setup packets, and bulk/interrupt/isoc data map onto SXUPTP messages.
-   This is the crux for URB translation.
 5. **Protocol library** — implement the SXUPTP client in Python (fast to iterate)
    as `bridge/sxuptp/`, validated against the spec.
 6. **usbip server** — implement the USB/IP server side (OP_REQ_DEVLIST,

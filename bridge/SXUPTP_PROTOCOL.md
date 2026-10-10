@@ -104,12 +104,31 @@ Wire header (offsets confirmed from the parse order; field *names* inferred):
 +0x0C  ...              for a control request: USB SETUP packet (see below)
 ```
 
-**`type` values** (dispatched at `0x3048F8`+ and `0x304AEA`+): low categories
-**1, 2, 3, 4**, each with a **`| 0x8000` variant** (0x8001–0x8004). The `0x8000`
-bit distinguishes response / data-in direction from the request form.
-Confidence: header size and big-endianness **high**; exact per-type semantics
-**medium** (1 = control, confirmed below; 2/3/4 = bulk/interrupt/isoc + cancel,
-inferred from the `VP_SXUP` transfer strings).
+**`type` field** = `(dir << 8) | category` (big-endian u16 at `+0x00`):
+
+- **`dir`** (high byte): `0x00` = request (host→device), `0x80` = response /
+  data-IN (device→host). Hence the 0x8001–0x8004 forms.
+- **`category`** (low byte) selects the transfer kind. The dispatcher
+  (`0x3048F8`+) routes by category; 2/3/4 converge on one data-transfer engine at
+  `0x304904`, differing only by minimum header size:
+
+| category | kind | min header | handler / notes |
+|---|---|---|---|
+| 1 | **control** | — | SETUP at `+0x0C` → `sub_0031EF2C` (confirmed) |
+| 2 | **data xfer** (bulk/interrupt) | `0x11` | endpoint `+7`, 32-bit length `+0x0C`; data engine `0x304904` |
+| 3 | **data xfer** (bulk/interrupt) | `0x11` | same engine; 2 vs 3 = direction/variant (inferred) |
+| 4 | **data xfer, extended** (isoc) | `0x17` | same engine + 6 extra header bytes (per-frame info, inferred) |
+| 0 / other | — | — | `#VP_SXUP: Unknown function<%x>` → `-ERR_HDR-` (`sub_0031E414`) |
+
+Confidence: header size, big-endianness, the `dir` bit, and category 1 (control)
+are **high**; the bulk/interrupt/isoc *assignment* of 2/3/4 is **inferred** from
+the min-header sizes and the `VP_SXUP` endpoint strings (not yet nailed to USB
+endpoint types).
+
+The data engine consumes the stream (`sub_0032D098`), decrements a remaining-
+length counter, and advances a per-transfer **phase** via `sub_00303674` with
+arg **1 / 2 / 3** (= setup / data / status, inferred). Within a transfer the
+parser tracks sub-states in `pkt[0]` (`ldrh` values 1–4 / 0x8001–0x8004).
 
 **Control transfer (type 1)** — the body carries a verbatim 8-byte **USB SETUP**
 packet at header `+0x0C`, read field-for-field and submitted via
@@ -143,10 +162,20 @@ and replies `-ERR_HDR-` (`sub_0031E414`).
 
 ### Still open
 
-- Exact semantics of `type` 2/3/4 and the `0x8000` responses (bulk vs
-  interrupt vs isoc; data framing / lengths).
+- Which of categories 2/3/4 is bulk vs interrupt vs isoc specifically (the
+  device routes by the endpoint's own descriptor, so the category may indicate
+  direction/phase rather than pipe type) — confirm by reversing the `VP_SXUP`
+  endpoint handlers (`0x3050xx` isoc, `0x305Bxx` intr-in) or via a capture.
+- The exact data-payload framing after the header for 2/3/4 (how multi-packet
+  transfers and short packets are chunked), and category 4's extra 6 header
+  bytes (per-frame lengths?).
 - The discovery *reply* body (device/port enumeration) the client parses to pick
   a device id (the `conn+0x64` value used at attach).
+
+With the control path and the type model in hand, enough is known to start a
+**probe client** (Milestone 5): do UDP discovery, TCP-attach a device, and issue
+a control `GET_DESCRIPTOR(device)` — whose round trip would also confirm the
+2/3/4 data framing empirically.
 
 ## Confirmed so far
 
