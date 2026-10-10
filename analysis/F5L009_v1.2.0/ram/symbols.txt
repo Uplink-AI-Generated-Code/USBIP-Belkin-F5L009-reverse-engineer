@@ -1,4 +1,9 @@
-# addr  name   (RAM image base 0x0, Thumb). Import into Ghidra/IDA.
+# F5L009 v1.2.0 reconstructed-RAM symbols (load base 0x0, Thumb).
+# Names are reverse-engineered (this project); "~" marks an approximate entry,
+# "?" an unverified role. Format: "0xADDR  name". Import into Ghidra/IDA
+# (adapt column order as your importer needs).
+
+# --- C runtime / helpers ---------------------------------------------------
 0x00336f24  printf_log
 0x00337070  strcpy
 0x00337084  strncpy
@@ -6,13 +11,83 @@
 0x0033652c  strlen
 0x003361e0  memset
 0x0033628c  bswap16
+0x0033629c  bswap32
 0x003362bc  put_le16
 0x003362c4  get_le16
+0x003362e0  get_le32
 0x003364b8  putc_logbuf
 0x00336544  puts_log
 0x00336518  put_crlf
 0x00339700  str_out
 0x0033967c  putc_out
 0x00339fa0  thumb_to_arm_veneer
+0x00339fb8  thumb_to_arm_icall_veneer
 0x00335e70  malloc_block
 0x002f959c  main
+0x0032cd2c  stream_copy_n          # copy N bytes off the data-channel stream
+0x0032d098  stream_consume
+
+# --- JCP (control protocol on UDP/TCP 19540) -------------------------------
+0x0032fe14  jcp_dispatch            # parse {u16 cmd,u16 sub,"NAME\0",body}, route by name
+0x0032fdd0  jcp_lookup_cmd_name     # match name against table @0x33A4CC
+0x0032ff1c  jcp_build_var_table     # build runtime var table @0x2F51D8 from source @0x33A4CC
+0x0032fcc8  jcp_exec_trampoline     # handler for SET IP_ADDR / CHK PASSWORD / EXEC * (misp template 39)
+0x0032fbc8  jcp_get_handler         # handler for GET CONTEXT/MENU_DATA/ENUM_DATA/EEP_DATA, SET DEFAULT
+0x0032fab0  jcp_save_eep_handler    # SAVE EEP_DATA
+0x0032fa1c  jcp_polling_handler     # POLLING
+0x002fa5d0  jcp_identify_handler    # cmd4/0x9506 discovery/identity reply
+
+# --- SXUPTP (USB-over-IP transport, port 19540) ----------------------------
+0x002fa478  jcp_scanner_connect_parse   # parse EXEC SCANNER CONNECT body
+0x00302c58  sxuptp_scanner_open         # create job for CONNECT (state 1)
+0x00302948  sxuptp_tcp_accept_match     # match accepted TCP conn to OPEN_WAIT job -> state 4
+0x00302924  sxuptp_free_job             # "Free job": zero job[0]/0x50/0xe4 (releases the slot)
+0x00302a44  sxuptp_conn_close           # close data-channel socket (RST/FIN), "Close job"
+0x00302fb0  sxuptp_conn_state_machine   # jump table on job[4]; state 3 -> teardown+free
+0x0030817c  sxuptp_data_pump            # data-channel pump started at job-active
+0x0030481c  sxuptp_tcp_msg_parser       # parse 24-byte data-channel header; dispatch by category
+0x003041e0  sxuptp_dispatch_pending_xfers  # process pending transfers; sb==2 -> intr-in queue read (0x304574)
+0x00303c70  sxuptp_build_msg_record     # ~0x40-byte outbound record
+0x00303c00  sxuptp_next_seq             # per-message sequence counter
+0x003039cc  sxuptp_encode_typed_fields  # discovery reply: typed-field encoder (table @0x37B798)
+0x00306d1c  usb_resolve_device_by_name  # resolve USB device by devNN port name
+0x00306650  usb_portname_resolver       # devNN <-> device table matcher
+
+# --- USB core transfer layer -----------------------------------------------
+0x0031e4d8  usb_get_device_ctx          # device context by devId/handle
+0x0031f368  usb_find_pipe_by_devaddr    # pipe lookup by (devaddr, ep, dir); miss -> 0xffff
+0x0031ef2c  usb_setup_serialize         # write 8-byte USB SETUP (wLength truncated to 16-bit)
+0x0031ef60  usb_control_submit          # build+submit control URB
+0x00304174  usb_find_intr_endpoint      # interrupt-endpoint lookup by type (1/2)
+
+# --- Interrupt (HID) class driver + USBUPTP glue ---------------------------
+# ops table (global @0x2F4FE0) set by set_intr_ops_table from literals @0x307880
+0x00305d58  intr_report_enqueue         # ops[0]: queue a completed interrupt report
+0x0030411c  intr_op1                    # ops[1]: role ?
+0x00305e20  intr_poll_submit            # ops[2]: submit/poll (Pin/Pout, "Res_Que Insert")
+0x00305b74  intr_op3                    # ops[3]: role ?
+0x003072c0  intr_op4                    # ops[4]: role ?
+0x00305900  intr_in_completion          # ~ interrupt-IN completion handler ("intr-in <ERR>/<STL>")
+0x003201e0  set_globals_pair            # store r0,r1 to two globals (leaf)
+0x0032ab5c  set_intr_ops_table          # copy 5 ops ptrs into table @0x2F4FE0 (leaf)
+0x0032a734  usbuptp_control_complete    # USBUPTP control completion callback (stored at job+0x3C)
+0x00329c20  usbuptp_get_ctx             # USBUPTP context lookup used by the op wrappers
+0x00329ce4  usbuptp_wrap_op0            # wrapper -> intr ops[0]
+0x00329d40  usbuptp_wrap_op1            # wrapper -> intr ops[1]
+
+# --- EHCI/OHCI host controller ---------------------------------------------
+0x00325cb0  ehci_intr_submit            # submit interrupt xfer on existing QH (cb @qh+0xc4); else "intrq not found"
+0x003206bc  ehci_find_qh                # QH lookup by key
+0x00323d1c  ehci_qh_lookup              # QH lookup used by open-pipe
+0x0032452c  ehci_qh_get_or_create       # ~ open interrupt pipe: get/alloc QH ("Got QHCB"), link to periodic list
+
+# --- Flash (memory-mapped AMD/Spansion-command-set NOR) --------------------
+0x002f7504  flash_cmd_write             # write command/data to flash (x8/x16)
+0x002f752c  flash_reset_read            # unlock cycles [0xAAA]=AA,[0x554]=55,[0xAAA]=F0 (reset to read)
+0x002f7568  flash_poll_toggle           # DQ6/DQ7 toggle-bit completion poll (DQ5 timeout)
+0x002f76f4  flash_sector_erase          # ~ sector erase loop ("%lx:Erase","Erase flash memory...")
+0x002f7b8c  flash_unlock_enable         # "unlock flash": set software write-enable interlock flag
+
+# --- Telnet (port 23) ------------------------------------------------------
+# login root / empty password; admin flag at telnet_session+0x14 gates privileged
+# items ("You must login as an administrator." @0x383eb0, check @0x32f65a).
