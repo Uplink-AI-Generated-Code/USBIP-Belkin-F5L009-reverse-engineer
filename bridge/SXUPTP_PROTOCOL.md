@@ -237,6 +237,34 @@ grant routing / exact TCP-match timing is the open issue. A created-but-
 unattached job stays **reserved** (new CONNECTs return `NG`) until it times out
 or the device is power-cycled — so test attach sparingly.
 
+### Attach — WORKING END-TO-END (confirmed live)
+
+The full attach path now works against the real device:
+
+1. JCP `EXEC SCANNER CONNECT` (**cmd=1**), body `{flag=1, mac_len=6, device_MAC,
+   client_IP, "devNN"}` → `OK`, job created (state 1).
+2. The SXUPTPD pump advances the job to **state 2 (OPEN_WAIT)** ~0.5 s later and
+   it then times out, so the client must **TCP-connect within that window**
+   (retry the connect for a few seconds to catch it).
+3. The accept handler matches the job by our **peer IP** → state 4 (active) →
+   the TCP data channel stays open (no RST).
+4. Over that socket the device **parses our 24-byte SXUPTP messages and replies**
+   — e.g. a control message gets a `0001 0000 ffff …` response. The channel is
+   live and bidirectional.
+
+Implemented as `SxuptpClient.attach(port_name, device_mac, client_ip)`.
+
+**Operational notes:** the OPEN_WAIT slot reserves the device; an un-matched job
+times out but the slot then stays `NG` until the device is power-cycled, so
+practically there's ~one clean attach attempt per power-cycle. The pump window is
+short (~0.5 s), hence the TCP-connect retry loop.
+
+**Remaining:** the control-transfer request fields aren't exactly right yet — the
+device returned a `0xffff` status rather than descriptor data, so the data-channel
+message layout (tag/length/endpoint fields around the 24-byte header, and the
+SETUP/data-phase handling) needs refinement. But this is now **iterative tuning
+against a live, talking channel**, not a blocked unknown.
+
 ### How to finish attach (what a capture must show)
 
 Pure static RE has reached its efficient limit here. A single capture of the

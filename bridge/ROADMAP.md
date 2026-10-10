@@ -44,11 +44,11 @@ interrupt / isochronous), and session ("job") lifecycle. See
 4. (started) **USB transfer encoding** — control fully decoded; categories 2/3/4
    identified and routed to one data engine (bulk/interrupt/isoc assignment still
    inferred). Remaining: exact payload chunking + endpoint-type mapping.
-3. **Attach** — mechanism fully understood: JCP_EXT `EXEC SCANNER CONNECT`
-   (device MAC + `devNN` port name + client IP) -> job OPEN_WAIT -> TCP match ->
-   active; release `EXEC SCANNER DISCONNECT`. BLOCKER: the request is a fixed
-   'misp template 39' structure (fields at offsets 0x54/0x56, pos/len-copied);
-   its exact byte layout is the one unknown. A client capture resolves it.
+3. ~~**Attach**~~ — **WORKING END-TO-END (live)**: JCP EXEC SCANNER CONNECT
+   (cmd=1, device MAC + devNN + client IP) -> OPEN_WAIT -> timed TCP connect ->
+   matched -> data channel open and bidirectional. See SXUPTP_PROTOCOL.md.
+   Remaining: refine the data-channel control-message fields (device returns
+   0xffff), now iterative against a live channel.
 5. (started) **Protocol library** — `bridge/sxuptp/` implements the confirmed
    framing (port, discovery, 24-byte header, control SETUP) with a passing
    self-test and a `--dry-run` probe. Stubbed: `attach()` (OPEN body unknown) and

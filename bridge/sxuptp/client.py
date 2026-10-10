@@ -106,20 +106,50 @@ class SxuptpClient:
         self.tcp = socket.create_connection((self.host, self.port), self.timeout)
         self.tcp.settimeout(self.timeout)
 
-    def attach(self, device_id: int) -> None:
-        """Claim a device on the open TCP session.
-
-        INFERRED: the firmware matches conn+0x64 (a device/port id) against a
-        pre-allocated job (job+0x28) in state OPEN_WAIT. The exact attach request
-        bytes the client sends were not reversed; this sends a best-effort
-        control-channel open and is the most likely thing to need fixing against
-        hardware.
+    def attach(self, port_name: str, device_mac: bytes, client_ip: str,
+               window: float = 5.0) -> None:
         """
-        raise NotImplementedError(
-            "attach(): request format not yet reverse-engineered — needs a "
-            "device/capture to confirm the OPEN request body (see "
-            "SXUPTP_PROTOCOL.md 'Still open')."
-        )
+        Claim a device and open the TCP data channel. CONFIRMED live.
+
+        Sequence: JCP `EXEC SCANNER CONNECT` (cmd=1) creates a job; the device
+        advances it to OPEN_WAIT (~0.5s) via its pump; we then TCP-connect and
+        the device matches the job by our peer IP -> data channel open. Because
+        the OPEN_WAIT window is short and then times out, we retry the TCP
+        connect across `window` seconds to catch it. Leaves self.tcp connected.
+        """
+        import struct
+        u = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        u.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            u.bind(("", self.port))
+        except OSError:
+            pass
+        u.settimeout(1.2)
+        u.sendto(p.pack_scanner_connect(port_name, client_ip, device_mac), (self.host, self.port))
+        try:
+            u.recv(256)   # "OK"
+        except socket.timeout:
+            pass
+        import time
+        t0 = time.time()
+        while time.time() - t0 < window:
+            s = socket.socket()
+            s.settimeout(0.5)
+            try:
+                s.connect((self.host, self.port))
+                s.settimeout(0.5)
+                try:
+                    s.recv(1)      # RST raises; timeout => held open (matched)
+                except socket.timeout:
+                    pass
+                self.tcp = s
+                u.close()
+                return
+            except (ConnectionResetError, ConnectionAbortedError, OSError):
+                s.close()
+            time.sleep(0.08)
+        u.close()
+        raise TimeoutError("could not match the OPEN_WAIT window (power-cycle if slot busy)")
 
     def control_transfer(self, setup: p.Setup, data: bytes = b"") -> bytes:
         """Send a control (category 1) message and read the response.
