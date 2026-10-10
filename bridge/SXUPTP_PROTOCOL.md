@@ -150,6 +150,35 @@ status): `<SCS>` success, `<STL>` stall, `<NAK T/O>` timeout, `<RETRY>`, `<ERR>`
 plus `Cancel pkt received`. Unknown `type` → logs `#VP_SXUP: Unknown function<%x>`
 and replies `-ERR_HDR-` (`sub_0031E414`).
 
+### Reply builders (device → host)
+
+- **Discovery reply (UDP 19540)**: the datagram handler `sendto`s (`sub_0031AE5C`)
+  a buffer at `session+0x24`, **max `0x400` (1024) bytes**, to the requester's
+  address (local port forced to 19540). The buffer is assembled as a **stream of
+  typed fields** by `sub_003039CC`, which dispatches a field-type selector `0..5`
+  through a 6-entry table at `0x37B798`:
+
+  | field type | encoder does | likely content |
+  |---|---|---|
+  | 2 | append string at `session+0x184` (strncpy) | device/product name |
+  | 1 | append string at `session+0x1C4` | second name/model string |
+  | 3 | typed value (switch on sub-type `[rec+8]`) | numbers / enums |
+  | 4 | conditional field from `[sess+0x10]` | optional field |
+  | 5 | timestamp delta (`now - job+0xD0`) | uptime / age |
+  | 0 | terminator / error (-1) | end |
+
+  So the discovery reply is a **typed-field record of cached device info**, not a
+  fixed struct. The specific field order/ids (and which advertise the device ids
+  used at attach) are data-driven — the remaining item best confirmed by a
+  capture.
+
+- **OPEN reply & data replies (TCP 19540)**: built as ~`0x40`-byte message
+  records with a **per-message sequence counter** (`sub_00303C70`, counter from
+  `sub_00303C00`) and sent through the same path. They **reuse the 24-byte header
+  format** decoded above, so the client parses them with the same `unpack` —
+  `dir=0x80` marks them as responses. Confidence: framing **high**; exact OPEN
+  reply field values **inferred**.
+
 ### Key functions (data path)
 
 | Addr | Role |
