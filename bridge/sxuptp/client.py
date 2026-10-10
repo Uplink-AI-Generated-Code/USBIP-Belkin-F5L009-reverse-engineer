@@ -77,6 +77,30 @@ class SxuptpClient:
         finally:
             s.close()
 
+    @staticmethod
+    def scanner_status(host: str, device_mac: bytes, port_name: str,
+                       port: int = p.PORT, timeout: float = 2.0) -> bytes:
+        """GET SCANNER_STATUS -> raw reply containing the device's USB
+        descriptors (read-only; no attach). Multi-byte descriptor fields are
+        big-endian in the reply. CONFIRMED live."""
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            s.bind(("", port))
+        except OSError:
+            pass
+        s.settimeout(timeout)
+        body = bytes([1, len(device_mac)]) + device_mac + port_name.encode() + b"\x00"
+        try:
+            s.sendto(p.pack_jcp(p.JCP_SCANNER_STATUS, body, command=1), (host, port))
+            try:
+                data, _ = s.recvfrom(4096)
+            except socket.timeout:
+                return b""
+            return data
+        finally:
+            s.close()
+
     # --- session (TCP 19540) --------------------------------------------
     def connect(self) -> None:
         self.tcp = socket.create_connection((self.host, self.port), self.timeout)

@@ -49,6 +49,7 @@ JCP_SCANNER_CONNECT = "EXEC SCANNER CONNECT"
 JCP_SCANNER_DISCONNECT = "EXEC SCANNER DISCONNECT"
 JCP_USB_DEVICE_LIST = "GET USB_DEVICE_LIST"
 JCP_USB_PORT_NAME = "GET USB_PORT_NAME"
+JCP_SCANNER_STATUS = "GET SCANNER_STATUS"   # returns raw USB descriptors (read-only)
 
 
 def pack_jcp(name: str, body: bytes = b"", command: int = JCP_CMD, sub: int = 0) -> bytes:

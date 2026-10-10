@@ -199,6 +199,26 @@ match by client IP → active; release = `EXEC SCANNER DISCONNECT`). The one
 remaining unknown is the **exact misp-template wire layout** of the
 `EXEC SCANNER CONNECT` request, which is client-defined and ARM-engine-driven.
 
+### `GET SCANNER_STATUS` returns USB descriptors — WORKING (read-only!)
+
+`GET SCANNER_STATUS` (cmd=1, body = `{flag=1, mac_len=6, device_MAC, "devNN"}` or
+just the `devNN` name) returns a large reply containing the device's **raw USB
+descriptors** — device, configuration, interface(s), endpoints — **without
+attaching**. Live example (Corsair "Voyager SliderX1"):
+
+```
+DEVICE : idVendor 0x1B1C (Corsair), idProduct 0x1A15, bMaxPacketSize0 64, 1 config
+CONFIG : 1 interface, bMaxPower 500 mA
+IFACE  : class 0x08 (Mass Storage), sub 0x06 (SCSI), proto 0x50 (Bulk-Only)
+EPs    : 0x01 OUT bulk, 0x82 IN bulk
+```
+
+**Multi-byte descriptor fields appear big-endian** in the reply (e.g. `bcdUSB`,
+`wTotalLength`, `idVendor`) — the bridge must byte-swap them back to the standard
+little-endian USB layout. This is exactly the data a USB/IP `OP_REP_DEVLIST` /
+descriptor fetch needs, and it is obtainable **read-only** — so the bridge can
+enumerate and advertise devices even before the attach handshake is solved.
+
 ### Attach — live progress (CONNECT works)
 
 Static insight that unlocked it: the EXEC trampoline `sub_0032FCC8` routes on
