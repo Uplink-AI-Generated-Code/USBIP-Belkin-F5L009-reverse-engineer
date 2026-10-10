@@ -275,11 +275,10 @@ if __name__ == "__main__":
 def control_read(dev_id: int, bm_request_type: int, b_request: int,
                  w_value: int, w_index: int, length: int, seq: int = 0) -> bytes:
     """Build a control-IN (device->host) message. Fields per pybelkusb + firmware."""
-    hdr = struct.pack(">HHHHHH BBHHHH",
-                      0x0001, seq & 0xFFFF, 0x0001, (dev_id & 0xFF) << 8,
-                      0x0201, 0x0008,
-                      bm_request_type, b_request, w_value, w_index, 0x0000, length)
-    return hdr.ljust(0x18, b"\x00")   # firmware copies a 0x18-byte header
+    return struct.pack(">HHHHHH BBHHHH",
+                       0x0001, seq & 0xFFFF, 0x0001, (dev_id & 0xFF) << 8,
+                       0x0201, 0x0008,
+                       bm_request_type, b_request, w_value, w_index, 0x0000, length)
 
 
 def control_write(dev_id: int, bm_request_type: int, b_request: int,
