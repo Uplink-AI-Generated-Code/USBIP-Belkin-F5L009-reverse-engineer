@@ -287,11 +287,31 @@ the control body at header `+0x0C` is a **10-byte** structure, not the standard
 
 **Live result with the corrected 10-byte SETUP:** the device parses it and
 fills the URB, but the transfer still completes `0x0001 0000 ffff …` — `0xffff`
-is a USB-level error/failure, not a framing rejection. So the message format is
-correct; the device is refusing the transfer itself. Most likely the SXUPTP
-session needs a **device reset / enumeration step** (or a specific first message)
-before control transfers are honored — runtime USB state that a client capture
-would show directly. This is the remaining piece.
+is a USB-level error/failure, not a framing rejection. The message format is
+correct; the device refuses the transfer itself.
+
+### ARM USB submit path — traced to its boundary
+
+The URB submit crosses from the Thumb app into the **ARM** USB host-controller
+driver (the device uses a PD720101 OHCI/EHCI controller). The path:
+
+- `sub_0031EF60` builds the URB (`sub_0031EF2C` fills the SETUP) and calls the
+  Thumb→ARM veneer at `0x33A008`.
+- That veneer lands in ARM at `0x335D80`, which is a **register-indirect call
+  table** (`bx r5` / `bx r6` / …) — i.e. the submit is a **dynamic (vtable)
+  dispatch** through a function pointer, not a static call.
+- A sibling veneer targets `0x4F55DC`, which is **above the 4 MB RAM
+  reconstruction** — so part of the ARM USB driver is not even in the captured
+  image.
+
+**Conclusion:** the `0xffff` originates inside the OO ARM USB-host-controller
+driver, reached by dynamic dispatch, with some of its code outside our RAM dump.
+Resolving it statically would require (a) reconstructing more RAM (>0x400000) and
+(b) following runtime vtables into the HC driver and the port/enumeration state
+machine — a large effort whose likely answer (the device needs a client-driven
+**reset/enumeration** before control transfers) is exactly what a short capture
+of SX Virtual Link's data-channel session would show directly. This is the
+efficient finish for the last gap.
 
 ### How to finish attach (what a capture must show)
 
