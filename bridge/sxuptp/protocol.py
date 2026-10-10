@@ -56,6 +56,25 @@ def pack_jcp(name: str, body: bytes = b"", command: int = JCP_CMD, sub: int = 0)
     return struct.pack(">HH", command, sub) + name.encode("latin1") + b"\x00" + body
 
 
+def parse_device_list(buf: bytes) -> list[dict]:
+    """
+    Parse a `GET USB_DEVICE_LIST` reply (cmd=1). CONFIRMED live: 8-byte header
+    {cmd,status,_,len}, then a count byte, then entries each beginning with the
+    ASCII port name `devNN` followed by the device product string.
+    Returns [{port, device}]. (Only the human-readable fields are decoded; the
+    binary attribute bytes between entries are left for later.)
+    """
+    import re
+    out = []
+    for m in re.finditer(rb"dev0[0-9A-Fa-f]", buf):
+        o = m.start()
+        port = buf[o:o + 6].rstrip(b"\x00").decode("latin1")
+        end = buf.find(b"\x00", o + 6)
+        device = buf[o + 6:end].decode("latin1") if end != -1 else ""
+        out.append({"port": port, "device": device})
+    return out
+
+
 def pack_scanner_connect(port_name: str, client_ip: str, client_mac: bytes) -> bytes:
     """
     EXEC SCANNER CONNECT request (body layout decoded from sub_002FA478).

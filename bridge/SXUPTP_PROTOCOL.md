@@ -147,12 +147,33 @@ GET SCANNER PORT_NAME   GET SCANNER_STATUS
 EXEC SCANNER CONNECT    EXEC SCANNER DISCONNECT
 ```
 
-**`EXEC SCANNER CONNECT`** (cmd=3) — tested live: accepted with a clean reply
-`0003…`, device unaffected, and `EXEC SCANNER DISCONNECT` releases cleanly.
-Body (decoded): `{u8 flag=1, u8 mac_len=6, u8[6] client_MAC, u32 client_IP (BE),
-char port_name[]}`. With `port_name="scn1"` the command ran but did **not** yet
-allocate a job (device stayed "Not Connected", TCP 19540 still RST), so the port
-identifier and/or a `sub_002FA0A0` pre-check parameter is not yet exactly right.
+**`GET USB_DEVICE_LIST`** (cmd=1) — WORKING live. 8-byte header, a count byte,
+then entries each `devNN\0` + product string + binary attributes. Live:
+
+```
+dev01  SONiX SI Gaming Keyboard   (interface 0)
+dev02  SONiX SI Gaming Keyboard   (interface 1)
+dev03  Corsair Voyager SliderX1
+```
+
+So **USB ports are named `devNN`**, not `scn1`. Implemented in
+`sxuptp.parse_device_list` / `SxuptpClient.list_devices`.
+
+**`EXEC SCANNER CONNECT`** — attach. Decoded requirements:
+- Pre-check `sub_002FA0A0`: body `[0]==1`, `[1]==6`, and `body[2:8]` must equal
+  the **device's own MAC** (`memcmp` vs `0x10ED60`; firmware logs
+  `JCPsub: CHECK MACADDR OK`). CONFIRMED.
+- Resolver `sub_00306650`: matches the port name against the device table
+  (names `devNN`). CONFIRMED the names via `GET USB_DEVICE_LIST`.
+
+Tested live with `port_name` `scn1` and `dev01`, correct device MAC + client IP:
+command accepted (`0003…`), but **no job allocated yet** (device still "Not
+Connected", TCP RST). Remaining: the exact **JCP_EXT** request framing. The
+firmware strings show a separate extended handler (`JCP_EXT: init <misp 39
+template>`, `JCP_EXT: JCP Name >> %s`); `EXEC SCANNER CONNECT` is a JCP_EXT
+command whose name/body wire offsets differ from the basic JCP vars, so the body
+isn't landing where `sub_002FA478` expects. Reversing the JCP_EXT dispatch is the
+next step.
 
 ### Remaining detail
 

@@ -57,6 +57,26 @@ class SxuptpClient:
         finally:
             s.close()
 
+    @staticmethod
+    def list_devices(host: str, port: int = p.PORT, timeout: float = 2.0) -> list:
+        """GET USB_DEVICE_LIST (cmd=1) -> [{port, device}]. CONFIRMED live."""
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            s.bind(("", port))   # reply comes to the well-known port
+        except OSError:
+            pass
+        s.settimeout(timeout)
+        try:
+            s.sendto(p.pack_jcp(p.JCP_USB_DEVICE_LIST, command=1), (host, port))
+            try:
+                data, _ = s.recvfrom(8192)
+            except socket.timeout:
+                return []
+            return p.parse_device_list(data)
+        finally:
+            s.close()
+
     # --- session (TCP 19540) --------------------------------------------
     def connect(self) -> None:
         self.tcp = socket.create_connection((self.host, self.port), self.timeout)

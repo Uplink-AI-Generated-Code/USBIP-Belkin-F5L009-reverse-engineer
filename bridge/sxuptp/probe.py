@@ -74,6 +74,8 @@ def main(argv: list[str] | None = None) -> int:
     d.add_argument("--broadcast", default="255.255.255.255")
     g = sub.add_parser("getdesc")
     g.add_argument("host")
+    dl = sub.add_parser("devlist")
+    dl.add_argument("host")
     args = ap.parse_args(argv)
 
     if args.dry_run or args.cmd is None:
@@ -82,6 +84,10 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_discover(args.broadcast)
     if args.cmd == "getdesc":
         return cmd_getdesc(args.host)
+    if args.cmd == "devlist":
+        for d in SxuptpClient.list_devices(args.host):
+            print(f"  {d['port']}  {d['device']}")
+        return 0
     return 1
 
 
