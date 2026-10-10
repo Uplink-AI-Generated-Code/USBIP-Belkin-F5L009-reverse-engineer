@@ -259,3 +259,49 @@ def _selftest() -> None:
 
 if __name__ == "__main__":
     _selftest()
+
+
+# ============================================================================
+# Data-channel transfers — cross-validated with daeken/pybelkusb (2009 capture)
+# ============================================================================
+# The 24-byte header fields we left zero are REQUIRED and carry the device id:
+#   [0:2] type (0001 ctrl-rd / 8001 ctrl-wr / 0003 bulk-in-rd per prefix)
+#   [2:4] seq (incrementing per transfer on the TCP channel)
+#   [4:6] 0x0001   [6:8] devId<<8   [8:10] 0x0201   [10:12] 0x0008   (control)
+#   [12] bmRequestType [13] bRequest [14:16] wValue [16:18] wIndex
+#   [18:20] 0x0000 [20:22] wLength
+# devId is obtained from the connect reply (see connect notes in SXUPTP_PROTOCOL.md).
+
+def control_read(dev_id: int, bm_request_type: int, b_request: int,
+                 w_value: int, w_index: int, length: int, seq: int = 0) -> bytes:
+    """Build a control-IN (device->host) message. Fields per pybelkusb + firmware."""
+    hdr = struct.pack(">HHHHHH BBHHHH",
+                      0x0001, seq & 0xFFFF, 0x0001, (dev_id & 0xFF) << 8,
+                      0x0201, 0x0008,
+                      bm_request_type, b_request, w_value, w_index, 0x0000, length)
+    return hdr.ljust(0x18, b"\x00")   # firmware copies a 0x18-byte header
+
+
+def control_write(dev_id: int, bm_request_type: int, b_request: int,
+                  w_value: int, w_index: int, payload: bytes = b"", seq: int = 0) -> bytes:
+    """Build a control-OUT (host->device) message (prefix 0x8001, field0 0x0003)."""
+    hdr = struct.pack(">HHHHHH BBHHHH",
+                      0x8001, seq & 0xFFFF, 0x0003, (dev_id & 0xFF) << 8,
+                      0x0201, 0x0008,
+                      bm_request_type, b_request, w_value, w_index, 0x0000, len(payload))
+    return hdr + payload
+
+
+def bulk_write(dev_id: int, endpoint: int, payload: bytes, seq: int = 0) -> bytes:
+    """Bulk-OUT: prefix 0x8003, body >HHBBHLH {0003,(devId<<8)|02,ep,01,8040,0,len}."""
+    hdr = struct.pack(">HHHBBHLH",
+                      0x8003, seq & 0xFFFF, 0x0003 if False else ((dev_id & 0xFF) << 8) | 0x02,
+                      endpoint & 0xFF, 0x01, 0x8040, 0, len(payload))
+    return hdr + payload
+
+
+def bulk_read(dev_id: int, endpoint: int, length: int, seq: int = 0) -> bytes:
+    """Bulk-IN: prefix 0x0003, direction field (devId<<8)|0x83. Reply: data after 10 bytes."""
+    return struct.pack(">HHHBBHLH",
+                       0x0003, seq & 0xFFFF, ((dev_id & 0xFF) << 8) | 0x83,
+                       endpoint & 0xFF, 0x01, 0x8040, 0, length)

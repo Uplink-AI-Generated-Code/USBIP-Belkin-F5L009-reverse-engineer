@@ -377,6 +377,40 @@ risks changing device state, so this wants care or a capture.
 > live testing showed that socket uses numeric commands. A good example of
 > hardware validation correcting a static-RE inference.
 
+## Cross-validation with daeken/pybelkusb (2009 capture-based decode)
+
+An independent 2009 decode (from packet captures, no firmware) agrees with this
+firmware-based RE on every point we had, and **supplies the data-channel transfer
+fields our static analysis couldn't reach** (they live in runtime-installed OO
+driver code). Two methods, 16 years apart, converging.
+
+Confirmed identical: port 19540; discovery `00 04 95 06` → `00 02 95 06` with
+MAC@0x38, name@0x24, IP@0x42, version@0x48, serial@0x74; `GET USB_DEVICE_LIST`
+with `devXX` nodes + `80 81` marker + VID/PID; `EXEC SCANNER CONNECT` body
+`01 06` + hub MAC + client IP + node string.
+
+**What it adds — the data-channel transfer framing (the `0xffff` fix):**
+
+- Control-IN (24-byte header, big-endian):
+  `[0:2]=0001 [2:4]=seq [4:6]=0001 [6:8]=devId<<8 [8:10]=0201 [10:12]=0008`
+  then `[12]=bmRequestType [13]=bRequest [14:16]=wValue [16:18]=wIndex
+  [18:20]=0000 [20:22]=wLength`. **We left `[4:6]/[6:8]/[8:10]/[10:12]` zero —
+  the missing `devId` at `[6]` is exactly the `(Ctrl)Not found DevAddr` error.**
+- Control-OUT: prefix `8001`, field0 `0003`, payload appended.
+- Bulk-OUT: prefix `8003`, body `>HHBBHLH` {`0003`→`(devId<<8)|02`, ep, `01`,
+  `8040`, `0`, len} + payload.
+- Bulk-IN: prefix `0003`, direction field `(devId<<8)|0x83`; reply data after a
+  10-byte header.
+
+**Connect is two UDP messages**: first `00 01 00 01 EXEC SCANNER CONNECT:` …,
+then a `00 03 00 01` variant ending `03 02 00`. The **devId** is then read from a
+reply (pybelkusb: "byte 3 of the next reply"). Also notes the connect **only
+worked from a different client IP** than the device's — relevant since our Mac is
+the hub's gateway (`192.168.2.1`).
+
+Implemented in `sxuptp.protocol`: `control_read` / `control_write` / `bulk_read`
+/ `bulk_write`.
+
 ## Transport map (Milestone 1 — confirmed)
 
 SXUPTP uses **port 19540** (`0x4C54`) on **both TCP and UDP** — matching the IANA
