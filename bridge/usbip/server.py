@@ -56,9 +56,18 @@ class Hub:
             busid = f"1-{i + 1}"
             self.devices[busid] = Device(host, client_ip, self.mac, d["port"],
                                          busid, busnum=1, devnum=i + 1,
+                                         vid=d.get("vid", 0), pid=d.get("pid", 0),
                                          udp=self._session, bc=self._grant,
                                          lock=self.attach_lock)
         self.names = {busid: d["device"] for busid, d in zip(self.devices, listed)}
+
+    def exclude_for(self, busid: str) -> tuple[int, ...]:
+        """devIds already bound to OTHER busids that share this one's VID:PID, so
+        two identical devices (e.g. the two keyboards) resolve to distinct handles."""
+        me = self.devices[busid]
+        return tuple(d.resolved_dev_id for b, d in self.devices.items()
+                     if b != busid and d.resolved_dev_id is not None
+                     and d.vid == me.vid and d.pid == me.pid)
 
     def _list_on_session(self, retries: int = 4) -> list:
         """GET USB_DEVICE_LIST on the shared session socket (same source port the
@@ -77,12 +86,14 @@ class Hub:
         return []
 
     def devlist(self) -> list[u.UsbipDevice]:
-        """Lightweight advertisement (no attach): busids + product name. idVendor/
-        idProduct are filled by IMPORT. `usbip attach -b <busid>` is the real path."""
+        """Advertisement (no attach): busids + VID:PID from GET USB_DEVICE_LIST.
+        Full descriptor fields are filled by IMPORT. `usbip attach -b <busid>`
+        is the real path."""
         out = []
         for busid, dev in self.devices.items():
             out.append(u.UsbipDevice(busid=busid, busnum=dev.busnum,
-                                     devnum=dev.devnum, b_num_interfaces=1,
+                                     devnum=dev.devnum, id_vendor=dev.vid,
+                                     id_product=dev.pid, b_num_interfaces=1,
                                      interfaces=[(0, 0, 0)]))
         return out
 
@@ -117,7 +128,7 @@ class Handler(socketserver.BaseRequestHandler):
             self.request.sendall(u.pack_import_reply(None))
             return
         try:
-            info = dev.attach()
+            info = dev.attach(exclude=hub.exclude_for(busid))
         except Exception as e:
             print(f"[usbip] import {busid} failed: {e}")
             self.request.sendall(u.pack_import_reply(None))

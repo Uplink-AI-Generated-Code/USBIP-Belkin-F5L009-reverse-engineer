@@ -26,7 +26,7 @@ class Device:
 
     def __init__(self, host: str, client_ip: str, device_mac: bytes,
                  node: str, busid: str, busnum: int, devnum: int,
-                 udp=None, bc=None, lock=None):
+                 vid: int = 0, pid: int = 0, udp=None, bc=None, lock=None):
         self.host = host
         self.client_ip = client_ip
         self.device_mac = device_mac
@@ -34,26 +34,33 @@ class Device:
         self.busid = busid
         self.busnum = busnum
         self.devnum = devnum
+        self.vid = vid         # expected USB VID:PID (from GET USB_DEVICE_LIST),
+        self.pid = pid         # used to resolve the right devId (not the node idx)
         self._udp = udp        # shared persistent session socket (list + connect)
         self._bc = bc          # shared persistent grant socket (client_ip:19540)
         self._lock = lock      # serialize attaches across the shared session socket
         self.client: SxuptpClient | None = None
         self.info: u.UsbipDevice | None = None
+        self.resolved_dev_id: int | None = None
 
     # --- lifecycle ------------------------------------------------------
-    def attach(self) -> u.UsbipDevice:
+    def attach(self, exclude: tuple[int, ...] = ()) -> u.UsbipDevice:
         """Open the SXUPTP channel and read enough descriptors to describe the
-        device to USB/IP. Returns the populated UsbipDevice (also cached)."""
+        device to USB/IP. Resolves the devId by VID:PID (the devId is a USB
+        address, not the devNN index); `exclude` skips handles already bound to
+        other busids with the same VID:PID. Returns the populated UsbipDevice."""
         c = SxuptpClient(self.host)
         if self._lock is not None:
             self._lock.acquire()
         try:
             c.attach(self.node, self.device_mac, self.client_ip,
                      udp=self._udp, bc=self._bc)
-            c.find_dev_id()                   # resolve the transfer handle
+            c.find_dev_id(want_vid=self.vid or None, want_pid=self.pid or None,
+                          exclude=exclude)
         finally:
             if self._lock is not None:
                 self._lock.release()
+        self.resolved_dev_id = c.dev_id
         self.client = c
 
         dd = c.control_transfer(sx.Setup.get_descriptor(desc_type=1, desc_index=0,

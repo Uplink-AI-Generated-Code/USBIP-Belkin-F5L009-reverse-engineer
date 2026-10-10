@@ -54,12 +54,17 @@ usbip attach -r <server-host> -b 1-1   # imports the device
   password login at `/en/login/login.htm`, then GET `/en/reset/exec.htm`), which
   takes ~10s. One attach session per reboot for now; clean release is still to
   reverse.
-- **devId vs node (known bug).** The SXUPTP transfer handle (devId) is currently
-  resolved by a sweep and is not equal to the `devNN` index — importing `1-1`
-  (Corsair) returned a handle whose descriptor is a SONiX keyboard (`0c45:8603`).
-  The devId should come from the OPEN_WAIT grant (byte 3) so each node maps to
-  its own device; capturing it reliably is the next correctness fix
-  (`backend.attach` / `client.find_dev_id`).
+- **devId vs node (resolved).** The SXUPTP transfer handle (devId) is a USB
+  device address, not the `devNN` index, and the hub does not announce it (the
+  OPEN_WAIT grant never arrives on `:19540` here). It is now resolved by matching
+  the device descriptor's **VID:PID** against the value `GET USB_DEVICE_LIST`
+  reports for each node (`client.find_dev_id(want_vid, want_pid)`); importing
+  `1-1` correctly returns the Corsair (`1b1c:1a15`). Two devices with identical
+  VID:PID (the two keyboards) are given distinct handles via `exclude`
+  (`Hub.exclude_for`). A hub with two indistinguishable devices of the same
+  VID:PID that also expose no usable discriminator could still be assigned in the
+  wrong order, but serials differ in the device list (`L21M0`/`L21M1`) if finer
+  matching is ever needed.
 
 ## Next
 

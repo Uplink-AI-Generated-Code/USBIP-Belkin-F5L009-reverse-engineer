@@ -234,18 +234,46 @@ class SxuptpClient:
         reply = self.tcp.recv(4096)
         return p.parse_control_reply(reply)
 
-    def find_dev_id(self, candidates: tuple[int, ...] = (3, 1, 2, 4, 5, 0, 6, 7, 8)) -> int:
-        """Probe candidate devIds with GET_DESCRIPTOR(device) until one returns
-        STATUS_OK, and remember it. Needed when the announcement was not captured.
+    def find_dev_id(self, candidates: tuple[int, ...] = (1, 2, 3, 4, 5, 6, 7, 8, 0),
+                    want_vid: int | None = None, want_pid: int | None = None,
+                    exclude: tuple[int, ...] = ()) -> int:
+        """Probe candidate devIds with GET_DESCRIPTOR(device) and pick one.
+
+        The devId is a USB device address, NOT the devNN index, and the hub does
+        not announce it to us (the OPEN_WAIT grant never arrives on :19540 here).
+        So we sweep and match by the device's VID:PID when given — this is the
+        reliable node->device mapping, since GET USB_DEVICE_LIST carries the
+        VID:PID for each devNN. Without want_vid/pid we take the first OK devId.
+        `exclude` skips handles already assigned (for duplicate VID:PID devices).
+        Remembers and returns the chosen devId.
         """
         setup = p.Setup.get_descriptor(desc_type=1, desc_index=0, length=18)
         order = ([self.dev_id] if self.dev_id is not None else []) + \
                 [c for c in candidates if c != self.dev_id]
+        first_ok = None
         for dv in order:
+            if dv in exclude:
+                continue
             status, data = self._control(dv, setup)
-            if status == p.STATUS_OK and data[:2] == b"\x12\x01":
+            if status != p.STATUS_OK or data[:2] != b"\x12\x01" or len(data) < 12:
+                continue
+            vid = data[8] | (data[9] << 8)
+            pid = data[10] | (data[11] << 8)
+            if want_vid is None:
                 self.dev_id = dv
                 return dv
+            if vid == want_vid and pid == want_pid:
+                self.dev_id = dv
+                return dv
+            if first_ok is None:
+                first_ok = dv
+        if want_vid is not None and first_ok is not None:
+            # no exact VID:PID match (e.g. device not reachable) — fall back
+            self.dev_id = first_ok
+            return first_ok
+        if first_ok is not None:
+            self.dev_id = first_ok
+            return first_ok
         raise RuntimeError("no devId returned a device descriptor")
 
     def control_transfer(self, setup: p.Setup, data: bytes = b"") -> bytes:

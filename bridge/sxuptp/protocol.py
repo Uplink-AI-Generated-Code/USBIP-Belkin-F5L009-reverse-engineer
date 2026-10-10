@@ -72,7 +72,17 @@ def parse_device_list(buf: bytes) -> list[dict]:
         port = buf[o:o + 6].rstrip(b"\x00").decode("latin1")
         end = buf.find(b"\x00", o + 6)
         device = buf[o + 6:end].decode("latin1") if end != -1 else ""
-        out.append({"port": port, "device": device})
+        # tail after the name's NUL: ip[4] flags[2] vid[2 BE] pid[2 BE] serial...
+        t = end + 1
+        vid = int.from_bytes(buf[t + 6:t + 8], "big") if end != -1 and len(buf) >= t + 8 else 0
+        pid = int.from_bytes(buf[t + 8:t + 10], "big") if end != -1 and len(buf) >= t + 10 else 0
+        serial = ""
+        if end != -1:
+            s_end = buf.find(b"\x00", t + 10)
+            if s_end != -1:
+                serial = buf[t + 10:s_end].decode("latin1", "replace")
+        out.append({"port": port, "device": device, "vid": vid, "pid": pid,
+                    "serial": serial})
     return out
 
 
