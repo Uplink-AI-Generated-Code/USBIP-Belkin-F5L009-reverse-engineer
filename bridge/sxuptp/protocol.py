@@ -41,6 +41,32 @@ def pack_udp_command(command: int, body: bytes = b"") -> bytes:
 JCP_IDENTIFY = 4          # with subcommand 0x9506 -> device identity/discovery
 JCP_IDENTIFY_SUB = 0x9506
 
+# Named JCP commands (request = u16 cmd, u16 sub, "NAME\0", body). The cmd value
+# selects a response class: 1 and 3 both observed valid. CONFIRMED live.
+JCP_CMD = 3               # class used by ENUM/SCANNER commands
+# USB/scanner verbs (from GET CONTEXT, live):
+JCP_SCANNER_CONNECT = "EXEC SCANNER CONNECT"
+JCP_SCANNER_DISCONNECT = "EXEC SCANNER DISCONNECT"
+JCP_USB_DEVICE_LIST = "GET USB_DEVICE_LIST"
+JCP_USB_PORT_NAME = "GET USB_PORT_NAME"
+
+
+def pack_jcp(name: str, body: bytes = b"", command: int = JCP_CMD, sub: int = 0) -> bytes:
+    """Build a named JCP request (CONFIRMED framing)."""
+    return struct.pack(">HH", command, sub) + name.encode("latin1") + b"\x00" + body
+
+
+def pack_scanner_connect(port_name: str, client_ip: str, client_mac: bytes) -> bytes:
+    """
+    EXEC SCANNER CONNECT request (body layout decoded from sub_002FA478).
+    NOTE: tested live but does not yet allocate a job — the exact port_name /
+    pre-check parameter still needs confirming. Reversible via DISCONNECT.
+    """
+    import socket as _s
+    body = bytes([1, len(client_mac)]) + client_mac + _s.inet_aton(client_ip) + \
+        port_name.encode("latin1") + b"\x00"
+    return pack_jcp(JCP_SCANNER_CONNECT, body)
+
 
 def pack_identify() -> bytes:
     """Discovery/identity request (CONFIRMED live): cmd=4, subcmd=0x9506."""

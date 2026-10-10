@@ -131,6 +131,29 @@ resolves the USB device by name (`sub_00306D1C`), and sets job state **1**.
 This maps cleanly onto a USB/IP exporter: `usbip attach` → CONNECT + TCP + the
 device descriptors; URBs ⇄ SXUPTP type-1..4 messages; detach → DISCONNECT.
 
+### JCP — confirmed live against the device
+
+Request framing CONFIRMED on hardware: `{u16 command, u16 sub, "NAME\0"[, body]}`
+to UDP 19540. The `command` value selects a response class: **1** (e.g.
+`GET CONTEXT`) and **3** (e.g. `GET ENUM_DATA`, `EXEC SCANNER CONNECT`) both work;
+unknown names → `"ERR(NOT SUPPORTED)"`, recognised-but-empty → `0003 0000 0000
+0000`.
+
+Full USB-related JCP command set (recovered from `GET CONTEXT`):
+
+```
+GET PORT_NAME        GET USB_PORT_NAME     GET USB_DEVICE_LIST
+GET SCANNER PORT_NAME   GET SCANNER_STATUS
+EXEC SCANNER CONNECT    EXEC SCANNER DISCONNECT
+```
+
+**`EXEC SCANNER CONNECT`** (cmd=3) — tested live: accepted with a clean reply
+`0003…`, device unaffected, and `EXEC SCANNER DISCONNECT` releases cleanly.
+Body (decoded): `{u8 flag=1, u8 mac_len=6, u8[6] client_MAC, u32 client_IP (BE),
+char port_name[]}`. With `port_name="scn1"` the command ran but did **not** yet
+allocate a job (device stayed "Not Connected", TCP 19540 still RST), so the port
+identifier and/or a `sub_002FA0A0` pre-check parameter is not yet exactly right.
+
 ### Remaining detail
 
 The exact byte offsets within the `EXEC SCANNER CONNECT` body and the JCP
