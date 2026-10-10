@@ -47,8 +47,10 @@ interrupt / isochronous), and session ("job") lifecycle. See
 3. **Attach handshake** — reverse `?SXUPTPD: Open(Req)`, the `suj_state` job
    state machine (OPEN → … → CLOSEREQ), and what a client must send to claim a
    device.
-5. **Protocol library** — implement the SXUPTP client in Python (fast to iterate)
-   as `bridge/sxuptp/`, validated against the spec.
+5. (started) **Protocol library** — `bridge/sxuptp/` implements the confirmed
+   framing (port, discovery, 24-byte header, control SETUP) with a passing
+   self-test and a `--dry-run` probe. Stubbed: `attach()` (OPEN body unknown) and
+   discovery-reply parsing — need a device/capture.
 6. **usbip server** — implement the USB/IP server side (OP_REQ_DEVLIST,
    OP_REQ_IMPORT, USBIP_CMD_SUBMIT/RET_SUBMIT) and wire URBs ⇆ SXUPTP.
 7. **Bring-up** — `usbip list`/`attach` against the bridge; iterate on a real
