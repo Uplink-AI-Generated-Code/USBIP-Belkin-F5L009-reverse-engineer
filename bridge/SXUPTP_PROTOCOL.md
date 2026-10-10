@@ -259,11 +259,22 @@ times out but the slot then stays `NG` until the device is power-cycled, so
 practically there's ~one clean attach attempt per power-cycle. The pump window is
 short (~0.5 s), hence the TCP-connect retry loop.
 
-**Remaining:** the control-transfer request fields aren't exactly right yet — the
-device returned a `0xffff` status rather than descriptor data, so the data-channel
-message layout (tag/length/endpoint fields around the 24-byte header, and the
-SETUP/data-phase handling) needs refinement. But this is now **iterative tuning
-against a live, talking channel**, not a blocked unknown.
+**Control transfers are asynchronous.** In the parser's control path
+(`sub_0030481C` sl==1), after `sub_0031EF2C` submits the USB request it stores a
+**completion callback `0x32A735` at `job+0x3C`** and returns — the device then
+sends the result in a **follow-up message** when the USB transfer completes. So
+the `0001 0000 ffff …` we saw to the first control message is an immediate ack,
+and the descriptor data arrives asynchronously afterwards.
+
+A live sweep confirmed the shape: the first control msg → `0001 0000 ffff …`;
+immediately sending more messages got empty replies and then closed the channel
+(a rapid malformed follow-up disrupts the in-flight async transfer).
+
+**Next test (one power-cycle):** attach, send a single control `GET_DESCRIPTOR`,
+then **keep reading** the TCP channel for a few seconds to catch the async
+descriptor reply — do not send anything else meanwhile. This is the last step to
+the first real USB round-trip; everything up to and including the live data
+channel is working.
 
 ### How to finish attach (what a capture must show)
 
