@@ -58,24 +58,34 @@ class SxuptpClient:
             s.close()
 
     @staticmethod
-    def list_devices(host: str, port: int = p.PORT, timeout: float = 2.0) -> list:
-        """GET USB_DEVICE_LIST (cmd=1) -> [{port, device}]. CONFIRMED live."""
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        try:
-            s.bind(("", port))   # reply comes to the well-known port
-        except OSError:
-            pass
-        s.settimeout(timeout)
-        try:
-            s.sendto(p.pack_jcp(p.JCP_USB_DEVICE_LIST, command=1), (host, port))
+    def list_devices(host: str, port: int = p.PORT, timeout: float = 2.0,
+                     src: str = "", retries: int = 2) -> list:
+        """GET USB_DEVICE_LIST (cmd=1) -> [{port, device}]. CONFIRMED live.
+
+        `src` binds the source IP (use a non-gateway alias for consistency with
+        attach). Retries once because the hub occasionally drops the first reply
+        right after a discovery round.
+        """
+        for _ in range(max(1, retries)):
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             try:
-                data, _ = s.recvfrom(8192)
-            except socket.timeout:
-                return []
-            return p.parse_device_list(data)
-        finally:
-            s.close()
+                s.bind((src, port))   # reply comes to the well-known port
+            except OSError:
+                pass
+            s.settimeout(timeout)
+            try:
+                s.sendto(p.pack_jcp(p.JCP_USB_DEVICE_LIST, command=1), (host, port))
+                try:
+                    data, _ = s.recvfrom(8192)
+                    devs = p.parse_device_list(data)
+                    if devs:
+                        return devs
+                except socket.timeout:
+                    pass
+            finally:
+                s.close()
+        return []
 
     @staticmethod
     def scanner_status(host: str, device_mac: bytes, port_name: str,
