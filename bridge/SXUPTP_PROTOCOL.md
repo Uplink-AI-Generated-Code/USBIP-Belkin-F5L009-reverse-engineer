@@ -304,8 +304,36 @@ driver (the device uses a PD720101 OHCI/EHCI controller). The path:
   reconstruction** — so part of the ARM USB driver is not even in the captured
   image.
 
+### The `0xffff` decoded, and the provable limit of static RE
+
+Reversing the USBUPTP control completion (`sub_0032A734`) shows `0xffff` is a
+**USB control-transfer error** — the firmware logs
+`?USBUPTP: (Ctrl)Trans Err[devaddr]-I/F[iface]` or
+`?USBUPTP: (Ctrl)Not found DevAddr[...]`. So the transfer reaches the USB proxy
+layer and fails there (device-address/interface lookup, or the transfer itself).
+
+Combined with `GET USB_DEVICE_LIST` (`dev01`/`dev02` = the keyboard's two
+**interfaces**, `dev03` = the storage), SXUPTP sessions are **per-interface** —
+so a device-level `GET_DESCRIPTOR` issued through an interface handle is the
+wrong request and errors. The practical bridge model this implies:
+
+- **Descriptors** come from `GET SCANNER_STATUS` (read-only, already working).
+- The **data channel** carries **endpoint I/O** (interrupt-IN for the keyboard,
+  bulk for the storage) per attached interface — not device-level control.
+
+**Where static RE provably ends:** the USB submit is a *dynamic* dispatch
+(`bx r5`-style trampolines at `0x335D80`) into the OO ARM host-controller driver,
+and a sibling target (`0x4F55DC`) lies in a region that a 16 MB boot
+reconstruction shows is **never populated by the boot scatter-load** — it holds
+the uninitialized-RAM fill pattern (`2b56 2d56 2f56…`), not code. That driver
+code and the dispatch vtables are installed at **runtime by `main()`**, which a
+boot-only emulation cannot run (it needs the full RTOS + USB hardware). So the
+exact control/enumeration behavior cannot be recovered by any static
+reconstruction — it would require full-system emulation or a client capture.
+
 **Conclusion:** the `0xffff` originates inside the OO ARM USB-host-controller
-driver, reached by dynamic dispatch, with some of its code outside our RAM dump.
+driver, reached by dynamic dispatch, whose code is runtime-installed and absent
+from every static artifact.
 Resolving it statically would require (a) reconstructing more RAM (>0x400000) and
 (b) following runtime vtables into the HC driver and the port/enumeration state
 machine — a large effort whose likely answer (the device needs a client-driven
