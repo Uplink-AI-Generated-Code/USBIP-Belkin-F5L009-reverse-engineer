@@ -1,27 +1,87 @@
-# Belkin F5L009 "Network USB Hub" — firmware tooling & reverse-engineering
+# Belkin F5L009 "Network USB Hub" — USB/IP bridge & reverse-engineering
 
-Reverse-engineering of the Silex `.VUP` firmware container used by the **Belkin
-F5L009 Network USB Hub** (a rebranded **Silex SX-2000U2** USB device server),
-plus a working encode/decode tool and a full static + dynamic analysis of both
-firmware images.
+The **Belkin F5L009 Network USB Hub** (a rebranded **Silex SX-2000U2** USB device
+server) shares USB devices over the network using Silex's proprietary **SXUPTP**
+transport. Its vendor software is abandonware — the control centre can't even
+connect to devices from Windows 10 on — so the hardware was headed for the
+e-waste pile.
 
-Everything here was derived from the firmware itself — no vendor documentation
-of the `.VUP` format is known to exist.
+This repo rescues it. It contains:
 
-## Contents
+1. **A working SXUPTP → USB/IP bridge** — reverse-engineered from the wire and the
+   firmware, it re-exports the hub's devices as standard [USB/IP](https://docs.kernel.org/usb/usbip_protocol.html),
+   so the hub works again on any modern Linux (and, via a container, macOS).
+2. **A full reverse-engineering of the Silex `.VUP` firmware** — an encode/decode
+   tool plus a static + dynamic (emulated-boot) analysis of both firmware images.
 
-| Path | What it is |
-|---|---|
-| [`fw_codec.py`](fw_codec.py) | Encode/decode/repack tool for `.VUP` images (+ self-test) |
-| [`FORMAT.md`](FORMAT.md) | The reverse-engineered `.VUP` container specification |
-| `F5L009_v1.2.0.bin` | Belkin F5L009 firmware v1.2.0 (test fixture) |
-| `SX-2000U2_v2.1.5.bin` | Silex SX-2000U2 firmware v2.1.5 (test fixture) |
-| [`analysis/`](analysis/) | Static + dynamic analysis of both images (see below) |
-| [`analysis/CROSS_VERSION_DIFF.md`](analysis/CROSS_VERSION_DIFF.md) | v1.2.0 vs v2.1.5 comparison |
+Everything here was derived from the device and its firmware — no vendor
+documentation of SXUPTP or the `.VUP` format is known to exist.
 
-## The tool
+## The bridge (what rescues the hub)
 
-`fw_codec.py` is pure-Python (stdlib only) and handles both images:
+[`bridge/`](bridge/) is a pure-Python (stdlib-only) USB/IP server that speaks
+SXUPTP to the hub on one side and the standard USB/IP wire protocol to a Linux
+`vhci_hcd` client on the other:
+
+```
+usbip client ── TCP 3240 ──▶ bridge.usbip.server ── UDP/TCP 19540 (SXUPTP) ──▶ hub ──▶ USB device
+```
+
+Run the exporter (point it at the hub IP, from a non-gateway IP on the hub's
+subnet), then attach from any Linux client:
+
+```sh
+python3 -m bridge.usbip.server 192.168.2.3 --client-ip 192.168.2.50
+# on the client:
+usbip list   -r <bridge-host>
+usbip attach -r <bridge-host> -b 1-1
+```
+
+No separate Linux box needed — Docker Desktop's kernel has `vhci_hcd` built in;
+see [`bridge/usbip/CLIENT.md`](bridge/usbip/CLIENT.md) for the container recipe.
+
+### Verified working, end-to-end against hardware
+
+| Device | Transfer types | Status |
+|---|---|---|
+| Corsair flash drive | control + **bulk** | mounts & reads files |
+| SONiX keyboard — keys & F-keys | control + **interrupt** (ep81) | live typing, n-key rollover |
+| SONiX keyboard — media/consumer keys | **interrupt** on a 2nd node (ep82) | volume / mute / play / track keys |
+| FTDI + Prolific USB-serial | control + **bulk** (async) | bidirectional + sustained loopback |
+
+Isochronous (audio/webcam) is not implemented. Hard-won details that make it work:
+
+- **Attach handshake** — a two-step UDP `EXEC SCANNER CONNECT` then a race to
+  match the brief TCP `OPEN_WAIT` window; the slot is freed by an **abortive RST**
+  close (no reboot needed). Concurrent nodes each need their own ephemeral CONNECT
+  socket. See [`bridge/SXUPTP_PROTOCOL.md`](bridge/SXUPTP_PROTOCOL.md).
+- **Uniform framing** — every data-channel reply is a 10-byte header + payload,
+  replies echo the request `seq` **out of order**, and `seq` is a `uint16` (must
+  wrap, or long sessions crash).
+- **Composite devices are split across nodes** — a device's interfaces appear as
+  separate hub nodes (keyboard keys on one, media keys on another), each on its
+  own channel; the bridge presents them as one USB device.
+- **Async endpoints via a channel mux** — interrupt and serial-RX bulk reads park
+  with no data, so a reader thread demuxes replies by `seq` and completes URBs
+  asynchronously, keeping the keyboard crisp and the serial link responsive.
+
+Bridge layout:
+
+```
+bridge/
+├── SXUPTP_PROTOCOL.md   the reverse-engineered SXUPTP wire protocol
+├── ROADMAP.md           design notes / status
+├── sxuptp/              SXUPTP client: discovery, attach, control/bulk/interrupt, ChannelMux
+├── usbip/               USB/IP server: wire protocol, device backend, CLIENT.md recipe
+└── tools/               decode_sxuptp_pcap.py — annotate SXUPTP packet captures
+```
+
+See [`TODO.md`](TODO.md) for remaining work (device unplug → clean USB/IP
+disconnect, reservation-steal, isochronous).
+
+## The firmware tooling
+
+`fw_codec.py` is pure-Python (stdlib only) and handles both firmware images:
 
 ```sh
 python3 fw_codec.py selftest                       # verify against both fixtures
@@ -36,7 +96,7 @@ python3 fw_codec.py recompute in.bin out.bin       # rebuild checksums after edi
 checksum chain, the ARM reset-vector sanity check, and rejection of malformed
 images — green on both firmware files.
 
-## The format, in brief
+### The `.VUP` format, in brief
 
 A `.VUP` image is a variable-length header (magic `.VUP`, length-prefixed device
 and version strings, record count) followed by a chain of records. Each record
@@ -45,7 +105,7 @@ and XOR-obfuscated data; the key cycles through `C3 F3 BC 8A CC E5 D7 9F` by
 `(seq-1) % 8`. Three checksum layers protect it (per-record backward chain, a
 seed echo, and a whole-file checksum). Full details in [`FORMAT.md`](FORMAT.md).
 
-## The analysis
+## The firmware analysis
 
 Each firmware was decoded, unpacked to a flat ARM image, and then **booted under
 emulation** (Unicorn) to reconstruct the post-boot RAM image, because the flash
@@ -61,6 +121,7 @@ analysis/
 │   ├── boot_trace.md            reset → MMU/cache → RAM copy → jump
 │   ├── ram_reconstruction.md    how the RAM image was emulated out
 │   ├── ram_reconstructed.bin    4 MB post-boot image (load at base 0, Thumb)
+│   ├── management_and_flash.md  telnet/web/JCP admin surface + flash/update path
 │   ├── ram_main.thumb.asm, ram_strings.txt
 │   └── ram/                     Thumb analysis of the RAM image
 │       ├── report.md, functions.txt, strings.txt, strings_xref.txt
@@ -70,30 +131,51 @@ analysis/
 └── SX-2000U2_v2.1.5/            same layout
 ```
 
-### Key findings
+### Key firmware findings
 - **Entry**: flash runs at exec base `0x01020000`; reset `0x01020480` sets up the
   MMU/cache and scatter-copies the app into RAM, then jumps to Thumb `main`
   (F5L009 `0x002F959C`, SX-2000U2 `0x0008B8D8`).
 - **App stack**: `JC-HTTPD/1.16.22` web server (11-language admin UI), DHCP/BOOTP,
   `silex FTP daemon`, UPnP, NetBIOS, the SXUPTP USB-over-IP transport, and a
   `DISH` debug shell.
+- **Management**: telnet in as `root` with no password; the web admin accepts an
+  empty password; the hub reboots over HTTP (`/en/reset/exec.htm`) to clear a
+  stuck slot. See [`analysis/F5L009_v1.2.0/management_and_flash.md`](analysis/F5L009_v1.2.0/management_and_flash.md).
 - **Shared codebase**: F5L009 and SX-2000U2 are the same Silex program; the C
   runtime maps `0x00336xxx ↔ 0x000D8xxx`. The main v1.2.0→v2.1.5 change is an
   expanded USB sub-driver framework. See the cross-version diff.
 
+## Contents
+
+| Path | What it is |
+|---|---|
+| [`bridge/`](bridge/) | SXUPTP → USB/IP bridge (the rescue) |
+| [`bridge/SXUPTP_PROTOCOL.md`](bridge/SXUPTP_PROTOCOL.md) | The reverse-engineered SXUPTP wire protocol |
+| [`bridge/usbip/CLIENT.md`](bridge/usbip/CLIENT.md) | Linux / Docker USB/IP client recipe |
+| `Packet_Dumps/` | SXUPTP captures used to reverse the protocol |
+| [`fw_codec.py`](fw_codec.py) | Encode/decode/repack tool for `.VUP` images (+ self-test) |
+| [`FORMAT.md`](FORMAT.md) | The reverse-engineered `.VUP` container specification |
+| `F5L009_v1.2.0.bin`, `SX-2000U2_v2.1.5.bin` | Firmware images (test fixtures) |
+| [`analysis/`](analysis/) | Static + dynamic analysis of both images |
+| [`TODO.md`](TODO.md) | Remaining bridge work |
+
 ## Reproducing
 
-The committed firmware `.bin` files are the only required inputs; all
-`analysis/` artifacts regenerate from them with `fw_codec.py` plus Capstone
-(disassembly) and Unicorn (boot emulation). Two large, noisy, regenerable
-outputs are intentionally git-ignored: `analysis/*/disasm_full.asm` (linear
-sweeps) and `*.unpacked/` (unpack outputs).
+- **Bridge**: needs the hub on the network and a Linux USB/IP client (or the
+  Docker recipe in [`bridge/usbip/CLIENT.md`](bridge/usbip/CLIENT.md)). The
+  protocol modules have stdlib-only self-tests: `python3 -m bridge.sxuptp.protocol`
+  and `python3 -m bridge.usbip.protocol`.
+- **Firmware**: the committed `.bin` files are the only required inputs; all
+  `analysis/` artifacts regenerate with `fw_codec.py` plus Capstone (disassembly)
+  and Unicorn (boot emulation). Two large, regenerable outputs are git-ignored:
+  `analysis/*/disasm_full.asm` and `*.unpacked/`.
 
 ## Scope & caveats
 
-- All reconstruction and verification is **static/offline** — no image here has
-  been flashed to hardware, and doing so carries real bricking risk.
+- The bridge talks to real hardware; the firmware reconstruction is **static/
+  offline** — no image here has been flashed, which carries real bricking risk.
 - The firmware `.bin` files are vendor firmware (© Belkin / silex technology),
-  included here for interoperability and analysis.
+  included for interoperability and analysis.
 - Analysis labels range from high confidence (unambiguous instruction shapes) to
   inferred; confidence is noted in each document.
+```
