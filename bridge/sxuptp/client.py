@@ -8,8 +8,11 @@ Belkin F5L009 hub (see ../SXUPTP_PROTOCOL.md).
 """
 from __future__ import annotations
 
+import collections
+import queue
 import socket
 import struct
+import threading
 import time
 
 from . import protocol as p
@@ -260,33 +263,41 @@ class SxuptpClient:
         data = self._recv_exact(size) if size else b""
         return status, data
 
-    def _read_reply(self, timeout: float) -> tuple[int, bytes]:
-        """Read one complete data-channel reply via a persistent buffer.
+    def _read_framed(self, timeout: float | None) -> tuple[int, int, bytes]:
+        """Read one complete data-channel message -> (seq, status, data).
 
         Every SXUPTP data-channel message is UNIFORMLY framed: a 10-byte header
         (type, seq, status, reserved, size) followed by `size` data bytes. There
         are no bare 6-byte ACKs (verified against a Windows-driver capture — a
-        keyboard report is a single 18-byte message: 10-byte header + 8 data).
+        keyboard report is a single 18-byte message: 10-byte header + 8 data), and
+        replies echo the request's seq in FIFO order.
 
         Buffering across calls makes framing robust to TCP fragmentation and to a
         `timeout` firing mid-message: on timeout the partial bytes stay in
         `self._rxbuf` and the socket.timeout propagates, so the next call resumes
-        exactly where this one stopped instead of losing sync.
+        exactly where this one stopped. `timeout=None` blocks indefinitely (the
+        ChannelMux reader always wants the next message).
         """
         self.tcp.settimeout(timeout)
         while True:
             if len(self._rxbuf) >= p.CTRL_REPLY_HEADER:
+                seq = struct.unpack_from(">H", self._rxbuf, 2)[0]
                 size = struct.unpack_from(">H", self._rxbuf, 8)[0]
                 total = p.CTRL_REPLY_HEADER + size
                 if len(self._rxbuf) >= total:
                     status = struct.unpack_from(">H", self._rxbuf, 4)[0]
                     data = self._rxbuf[p.CTRL_REPLY_HEADER:total]
                     self._rxbuf = self._rxbuf[total:]
-                    return status, data
+                    return seq, status, data
             chunk = self.tcp.recv(2048)      # socket.timeout keeps _rxbuf intact
             if not chunk:
                 raise ConnectionError("peer closed during reply")
             self._rxbuf += chunk
+
+    def _read_reply(self, timeout: float) -> tuple[int, bytes]:
+        """Read one complete data-channel reply (status, data), ignoring seq."""
+        _seq, status, data = self._read_framed(timeout)
+        return status, data
 
     def bulk_out(self, ep_addr: int, data: bytes) -> int:
         """Bulk/interrupt OUT transfer -> status (0 = OK). ep_addr is a full USB
@@ -448,3 +459,155 @@ class SxuptpClient:
             if getattr(self, "_owns_bc", True):
                 self._bc.close()
             self._bc = None
+
+
+class ChannelMux:
+    """Multiplex control + several interrupt endpoints over ONE attached channel.
+
+    The hub serves every endpoint of a composite device (e.g. a keyboard's ep81
+    keys and ep82 consumer/media keys) on the same SXUPTP channel, and replies
+    echo the request's seq in strict FIFO order. A single-threaded URB loop cannot
+    block on one interrupt endpoint without starving the other, so this owns the
+    channel after enumeration: one reader thread drains every reply and demuxes by
+    seq —
+
+      * interrupt reports -> the matching endpoint; the kernel's pending URB for
+        that endpoint is completed via its callback, and one read is kept
+        outstanding (resubmitted) so reports are delivered the instant they
+        arrive (no polling, no latency, no 0-length churn);
+      * control replies -> the waiting control() caller.
+
+    Sends on the SXUPTP socket are serialized with `_lock`; the reader only
+    receives. The URB-completion callbacks send on the (separate) USB/IP socket,
+    which the server serializes independently.
+    """
+
+    def __init__(self, client: SxuptpClient):
+        self.c = client
+        self._lock = threading.Lock()
+        self._ep_cfg: dict[int, tuple[int, int]] = {}      # ep -> (length, interval)
+        self._primed: set[int] = set()                     # eps with a read outstanding
+        self._seq_ep: dict[int, int] = {}                  # outstanding read seq -> ep
+        self._pending: dict[int, "collections.deque"] = {} # ep -> URBs awaiting a report
+        self._reports: dict[int, "collections.deque"] = {} # ep -> reports awaiting a URB
+        self._ctrl: dict[int, list] = {}                   # control seq -> [Event, result]
+        self._err: Exception | None = None
+        self._alive = True
+        self._t = threading.Thread(target=self._reader, daemon=True)
+        self._t.start()
+
+    def register_intr(self, ep_addr: int, length: int, interval: int) -> None:
+        self._ep_cfg[ep_addr] = (length or 8, interval or 10)
+        self._pending[ep_addr] = collections.deque()
+        self._reports[ep_addr] = collections.deque()
+
+    # --- interrupt (async) ----------------------------------------------
+    def _prime(self, ep: int) -> None:
+        """Send one interrupt_read for `ep` (caller holds _lock)."""
+        length, interval = self._ep_cfg[ep]
+        self.c.seq += 1
+        seq = self.c.seq
+        self._seq_ep[seq] = ep
+        self.c.tcp.sendall(p.interrupt_read(self.c.dev_id, ep, length, interval, seq=seq))
+        self._primed.add(ep)
+
+    def enqueue(self, ep: int, urb, complete) -> None:
+        """Register a kernel interrupt-IN URB. `complete(urb, status, data)` is
+        called (possibly on the reader thread) when a report for `ep` arrives; if
+        a report is already buffered it completes immediately."""
+        with self._lock:
+            if self._err:
+                complete(urb, EREMOTEIO_, b"")
+                return
+            rep = self._reports[ep]
+            if rep:
+                status, data = rep.popleft()
+                cb = (urb, complete)
+            else:
+                self._pending[ep].append((urb, complete))
+                cb = None
+            if ep not in self._primed:
+                self._prime(ep)
+        if cb is not None:
+            cb[1](cb[0], status, data)
+
+    def cancel(self, ep: int) -> None:
+        """Drop any URBs queued for `ep` (on UNLINK / teardown)."""
+        with self._lock:
+            self._pending.get(ep, collections.deque()).clear()
+
+    # --- control (synchronous) ------------------------------------------
+    def control(self, setup: p.Setup, data: bytes = b"", timeout: float = 3.0) -> tuple[int, bytes]:
+        ev = threading.Event()
+        with self._lock:
+            if self._err:
+                raise self._err
+            self.c.seq += 1
+            seq = self.c.seq
+            self._ctrl[seq] = [ev, None]
+            if setup.bmRequestType & 0x80:
+                req = p.control_read(self.c.dev_id, setup.bmRequestType, setup.bRequest,
+                                     setup.wValue, setup.wIndex, setup.wLength, seq=seq)
+            else:
+                req = p.control_write(self.c.dev_id, setup.bmRequestType, setup.bRequest,
+                                      setup.wValue, setup.wIndex, data, seq=seq)
+            self.c.tcp.sendall(req)
+        if not ev.wait(timeout):
+            with self._lock:
+                self._ctrl.pop(seq, None)
+            raise TimeoutError("control transfer timed out")
+        with self._lock:
+            res = self._ctrl.pop(seq, None)
+        if self._err:
+            raise self._err
+        return res[1]
+
+    # --- reader ----------------------------------------------------------
+    def _reader(self) -> None:
+        try:
+            while self._alive:
+                seq, status, data = self.c._read_framed(None)
+                done = None
+                with self._lock:
+                    ep = self._seq_ep.pop(seq, None)
+                    if ep is not None:
+                        self._primed.discard(ep)
+                        pend = self._pending[ep]
+                        if pend:
+                            urb, complete = pend.popleft()
+                            done = (complete, urb, status, data)
+                        else:
+                            self._reports[ep].append((status, data))
+                        self._prime(ep)                 # keep one outstanding
+                    else:
+                        w = self._ctrl.get(seq)
+                        if w is not None:
+                            w[1] = (status, data)
+                            w[0].set()
+                if done is not None:
+                    done[0](done[1], done[2], done[3])  # complete URB (no lock held)
+        except Exception as e:                           # socket closed / peer gone
+            self._err = e
+            self._alive = False
+            with self._lock:
+                for w in self._ctrl.values():
+                    w[0].set()
+                pend_all = [(c, u) for dq in self._pending.values() for (u, c) in dq]
+                for dq in self._pending.values():
+                    dq.clear()
+            for complete, urb in pend_all:
+                try:
+                    complete(urb, EREMOTEIO_, b"")
+                except Exception:
+                    pass
+
+    def close(self) -> None:
+        self._alive = False
+        try:
+            self.c.tcp.shutdown(socket.SHUT_RDWR)        # unblock the reader's recv
+        except OSError:
+            pass
+
+
+# USB/IP short-IO errno surfaced to a URB when the channel dies mid-flight.
+EREMOTEIO_ = -121

@@ -142,7 +142,17 @@ class Handler(socketserver.BaseRequestHandler):
             dev.detach()
             print(f"[usbip] detached {busid}")
 
+    def _send_ret(self, cmd, status: int, data: bytes) -> None:
+        """Send one RET_SUBMIT. Serialized because interrupt completions arrive on
+        the mux reader thread while the loop may be sending other replies."""
+        with self._send_lock:
+            try:
+                self.request.sendall(u.pack_ret_submit(cmd, status, data))
+            except OSError:
+                pass
+
     def _urb_loop(self, dev: Device) -> None:
+        self._send_lock = threading.Lock()
         while True:
             try:
                 hdr = self._recvall(u.CMD_HDR_LEN)
@@ -152,10 +162,18 @@ class Handler(socketserver.BaseRequestHandler):
             if command == u.USBIP_CMD_SUBMIT:
                 if not cmd.is_in and cmd.transfer_buffer_length:
                     cmd.transfer_buffer = self._recvall(cmd.transfer_buffer_length)
-                status, data = dev.submit(cmd)
-                self.request.sendall(u.pack_ret_submit(cmd, status, data))
+                if dev.is_async_interrupt(cmd):
+                    # completed later, on the mux reader thread, when a report lands
+                    dev.enqueue_interrupt(cmd, self._send_ret)
+                else:
+                    status, data = dev.submit(cmd)
+                    self._send_ret(cmd, status, data)
             elif command == u.USBIP_CMD_UNLINK:
-                self.request.sendall(u.pack_ret_unlink(cmd, 0))
+                with self._send_lock:
+                    try:
+                        self.request.sendall(u.pack_ret_unlink(cmd, 0))
+                    except OSError:
+                        pass
 
 
 class Server(socketserver.ThreadingTCPServer):

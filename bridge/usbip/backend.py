@@ -5,18 +5,25 @@ Maps the hub's USB devices onto USB/IP busids and turns USBIP_CMD_SUBMIT into
 SXUPTP transfers via `sxuptp.SxuptpClient`.
 
 Control (ep0), bulk, and interrupt (HID) all run on the device's one SXUPTP data
-channel. Each hub node (interface) is its own busid/channel, so a keyboard's ep0
-enumeration and its ep81 interrupt reports share a single channel with no
-competing traffic. Interrupt uses transfer type 0x0002 and every reply is a
-uniformly framed 10-byte-header + data message (see sxuptp.client._read_reply);
-exactly one interrupt_read is kept outstanding so idle waits never pile up.
+channel; interrupt uses transfer type 0x0002 and every reply is a uniformly
+framed 10-byte-header + data message (see sxuptp.client._read_framed).
+
+Two interrupt-endpoint shapes:
+  * One interrupt-IN endpoint (a plain keyboard): the URB loop polls it
+    synchronously, keeping exactly one interrupt_read outstanding.
+  * Several interrupt-IN endpoints (a COMPOSITE HID device, e.g. this keyboard's
+    ep81 keys + ep82 consumer/media + system control): we present the full device
+    and hand the channel to a ChannelMux. Its reader thread demuxes every reply by
+    seq, completes each kernel URB asynchronously the instant its report lands, and
+    carries control transfers too — so the endpoints never starve each other and
+    the keyboard stays crisp while the media keys ride the same channel.
 """
 from __future__ import annotations
 
 import socket
 import struct
 
-from ..sxuptp.client import SxuptpClient
+from ..sxuptp.client import ChannelMux, SxuptpClient
 from ..sxuptp import protocol as sx
 from . import protocol as u
 
@@ -53,6 +60,9 @@ class Device:
         self.resolved_dev_id: int | None = None
         self.ep_info: dict[int, tuple[int, int]] = {}
         self.single_cfg: bytes | None = None
+        self.composite: bool = False
+        self.intr_in_eps: list[int] = []
+        self.mux = None                        # ChannelMux in composite mode
 
     # --- lifecycle ------------------------------------------------------
     def attach(self, exclude: tuple[int, ...] = ()) -> u.UsbipDevice:
@@ -98,16 +108,16 @@ class Device:
         # A single-interface config descriptor we present to the kernel (see
         # self.single_cfg below); None until synthesized.
         self.single_cfg: bytes | None = None
+        # All interrupt-IN endpoint addrs, in descriptor order (ep81, ep82, ...).
+        self.intr_in_eps: list[int] = []
+        self.ep_mps: dict[int, int] = {}       # endpoint addr -> wMaxPacketSize
+        self.composite = False
         if total > 9:
             full = c.control_transfer(sx.Setup.get_descriptor(desc_type=2, desc_index=0,
                                                              length=total))
-            # The hub splits a composite device's interfaces across SEPARATE nodes
-            # (dev02=interface0/ep81, dev03=interface1/ep82), each on its own SXUPTP
-            # channel. This busid is ONE node and serves only its first interface's
-            # endpoint; polling the other interface's EP on this channel corrupts it
-            # (verified: it drove the keyboard into a -32 reset loop). So we present
-            # only interface 0 to the client and cut `full` off at the 2nd INTERFACE
-            # descriptor, so the kernel never creates/polls the foreign interface.
+            # Walk the full config, collecting every interface's class triple and
+            # every endpoint. `cut` marks the start of the 2nd interface (used only
+            # for the single-interface fallback below).
             cut = len(full)
             seen_iface = False
             i = 0
@@ -116,9 +126,8 @@ class Device:
                 if blen == 0:
                     break
                 if btype == 0x04:                            # INTERFACE descriptor
-                    if seen_iface:
+                    if seen_iface and cut == len(full):
                         cut = i                              # start of 2nd interface
-                        break
                     seen_iface = True
                     if i + 8 < len(full):
                         interfaces.append((full[i + 5], full[i + 6], full[i + 7]))
@@ -127,11 +136,22 @@ class Device:
                     attr = full[i + 3] & 0x03
                     mps = (full[i + 4] | (full[i + 5] << 8)) & 0x07FF
                     interval = full[i + 6]
-                    self.ep_info[addr] = (attr, interval)    # only interface 0's EPs
+                    self.ep_info[addr] = (attr, interval)
+                    self.ep_mps[addr] = mps
                     max_ep_mps = max(max_ep_mps, mps)
+                    if attr == 3 and (addr & 0x80):
+                        self.intr_in_eps.append(addr)
                 i += blen
 
-            if cut < len(full):
+            # A composite HID device (e.g. this keyboard: ep81 keys + ep82
+            # consumer/media keys) has >1 interrupt-IN endpoint. The hub serves them
+            # all on this one channel; a ChannelMux (created after enumeration)
+            # demuxes the shared stream by seq so we can present the FULL device.
+            # Otherwise (a lone extra interface with no interrupt-IN endpoint we
+            # handle) fall back to presenting only interface 0 — cut the descriptor
+            # at the 2nd INTERFACE so the kernel never polls the foreign endpoint.
+            self.composite = len(self.intr_in_eps) >= 2
+            if not self.composite and cut < len(full):
                 single = bytearray(full[:cut])
                 single[2] = cut & 0xFF                       # wTotalLength (LE)
                 single[3] = (cut >> 8) & 0xFF
@@ -160,9 +180,24 @@ class Device:
             b_device_subclass=dev_sub, b_device_protocol=dev_proto,
             b_configuration_value=cfg_value, b_num_configurations=num_cfg or 1,
             b_num_interfaces=num_intf or 1, interfaces=interfaces)
+
+        # Composite HID: hand the channel to a mux that demuxes control + every
+        # interrupt endpoint by seq. After this point all channel I/O for this
+        # device goes through the mux (the reader thread owns the socket).
+        if self.composite:
+            self.mux = ChannelMux(c)
+            for ep in self.intr_in_eps:
+                attr, interval = self.ep_info[ep]
+                self.mux.register_intr(ep, self.ep_mps.get(ep, 8) or 8, interval)
         return self.info
 
     def detach(self) -> None:
+        if self.mux is not None:
+            try:
+                self.mux.close()
+            except Exception:
+                pass
+            self.mux = None
         if self.client:
             try:
                 self.client.disconnect()
@@ -170,8 +205,30 @@ class Device:
                 self.client = None
 
     # --- URB handling ---------------------------------------------------
+    def is_async_interrupt(self, cmd: u.CmdSubmit) -> bool:
+        """True if this SUBMIT is an interrupt-IN the ChannelMux completes
+        asynchronously (so the URB loop must not reply inline)."""
+        if self.mux is None or not cmd.is_in:
+            return False
+        ep_num = cmd.ep & 0x0F
+        if ep_num == 0:
+            return False
+        ep_addr = ep_num | 0x80
+        return self.ep_info.get(ep_addr, (2, 0))[0] == 3
+
+    def enqueue_interrupt(self, cmd: u.CmdSubmit, complete) -> None:
+        """Hand an interrupt-IN URB to the mux; `complete(cmd, status, data)` is
+        invoked when a report arrives (status 0 = OK)."""
+        ep_addr = (cmd.ep & 0x0F) | 0x80
+        self.mux.enqueue(ep_addr, cmd,
+                         lambda c, st, data: complete(
+                             c, 0 if st == 0 else EREMOTEIO, data if st == 0 else b""))
+
     def submit(self, cmd: u.CmdSubmit) -> tuple[int, bytes]:
-        """Execute a SUBMIT -> (usbip_status, in_data). status 0 = success."""
+        """Execute a synchronous SUBMIT -> (usbip_status, in_data). status 0 = OK.
+
+        Interrupt-IN in composite (mux) mode is handled by enqueue_interrupt, not
+        here — see is_async_interrupt."""
         if self.client is None:
             return EPIPE, b""
         ep_num = cmd.ep & 0x0F
@@ -180,9 +237,10 @@ class Device:
         ep_addr = (ep_num | 0x80) if cmd.is_in else ep_num
         attr, interval = self.ep_info.get(ep_addr, (2, 10))
         try:
-            if attr == 3:                    # interrupt IN (type 0x0002) on main channel
+            if attr == 3:                    # interrupt
                 if not cmd.is_in:
                     return EPIPE, b""        # interrupt OUT: unsupported for now
+                # non-mux (single interrupt endpoint) path: synchronous one-shot
                 try:
                     status, data = self.client.interrupt_in(
                         ep_addr, cmd.transfer_buffer_length or 8, interval or 10,
@@ -203,6 +261,13 @@ class Device:
         setup = sx.Setup(bmRequestType=bm, bRequest=b_req, wValue=w_value,
                          wIndex=w_index, wLength=w_length)
         try:
+            # In composite mode the mux owns the channel; route control through it.
+            if self.mux is not None:
+                if bm & 0x80:
+                    status, data = self.mux.control(setup)
+                    return (0, data[:w_length]) if status == 0 else (EPIPE, b"")
+                status, _ = self.mux.control(setup, cmd.transfer_buffer)
+                return (0, b"") if status == 0 else (EPIPE, b"")
             if bm & 0x80:                    # IN
                 # Serve our single-interface config descriptor (hides the foreign
                 # interface whose EP lives on another node) instead of the device's
