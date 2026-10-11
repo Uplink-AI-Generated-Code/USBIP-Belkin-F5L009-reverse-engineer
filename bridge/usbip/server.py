@@ -51,15 +51,36 @@ class Hub:
         self.mac = bytes(int(x, 16) for x in devs[0]["mac"].split(":"))
         time.sleep(1.0)   # the hub drops a device-list query issued too soon after discovery
         listed = self._list_on_session(retries=4)
+        # Group same-VID:PID nodes in list order: a composite device's interfaces
+        # are split across consecutive nodes (dev02=if0, dev03=if1). The first node
+        # of a group is the primary busid; when it attaches and finds a multi-
+        # interface config it claims the others as secondary channels (see below).
+        self._claimed: set[str] = set()         # sibling nodes hidden by a composite
+        self._claim_lock = threading.Lock()
+        sib: dict[tuple[int, int], list[str]] = {}
+        for d in listed:
+            sib.setdefault((d.get("vid", 0), d.get("pid", 0)), []).append(d["port"])
         self.devices: dict[str, Device] = {}
         for i, d in enumerate(listed):
             busid = f"1-{i + 1}"
+            siblings = tuple(sib.get((d.get("vid", 0), d.get("pid", 0)), [d["port"]]))
             self.devices[busid] = Device(host, client_ip, self.mac, d["port"],
                                          busid, busnum=1, devnum=i + 1,
                                          vid=d.get("vid", 0), pid=d.get("pid", 0),
                                          udp=self._session, bc=self._grant,
-                                         lock=self.attach_lock)
+                                         lock=self.attach_lock,
+                                         siblings=siblings, hub=self)
         self.names = {busid: d["device"] for busid, d in zip(self.devices, listed)}
+        self._node_busid = {d.node: b for b, d in self.devices.items()}
+
+    def claim_node(self, node: str) -> None:
+        """Mark a node as a composite secondary so its standalone busid refuses."""
+        with self._claim_lock:
+            self._claimed.add(node)
+
+    def is_claimed(self, node: str) -> bool:
+        with self._claim_lock:
+            return node in self._claimed
 
     def exclude_for(self, busid: str) -> tuple[int, ...]:
         """devIds already bound to OTHER busids that share this one's VID:PID, so
@@ -125,6 +146,13 @@ class Handler(socketserver.BaseRequestHandler):
         busid = u.parse_import_request_busid(hdr + self._recvall(32))
         dev = hub.devices.get(busid)
         if dev is None:
+            self.request.sendall(u.pack_import_reply(None))
+            return
+        if hub.is_claimed(dev.node):
+            # secondary interface node of a composite device, already exported as
+            # part of its primary busid — not importable on its own.
+            print(f"[usbip] import {busid} refused: secondary channel of a "
+                  f"composite device (import its primary busid instead)")
             self.request.sendall(u.pack_import_reply(None))
             return
         try:

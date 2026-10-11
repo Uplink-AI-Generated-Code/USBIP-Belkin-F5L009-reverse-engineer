@@ -11,12 +11,16 @@ framed 10-byte-header + data message (see sxuptp.client._read_framed).
 Two interrupt-endpoint shapes:
   * One interrupt-IN endpoint (a plain keyboard): the URB loop polls it
     synchronously, keeping exactly one interrupt_read outstanding.
-  * Several interrupt-IN endpoints (a COMPOSITE HID device, e.g. this keyboard's
-    ep81 keys + ep82 consumer/media + system control): we present the full device
-    and hand the channel to a ChannelMux. Its reader thread demuxes every reply by
-    seq, completes each kernel URB asynchronously the instant its report lands, and
-    carries control transfers too — so the endpoints never starve each other and
-    the keyboard stays crisp while the media keys ride the same channel.
+  * COMPOSITE HID device (this keyboard: if0=ep81 keys, if1=ep82 consumer/media +
+    system control). The hub splits a composite device's interfaces across
+    SEPARATE nodes/channels (dev02=if0, dev03=if1) and delivers each endpoint's
+    reports only on its own node's channel. So we present the full device, run the
+    primary node (control + if0/ep81) through a ChannelMux, and open a SECONDARY
+    channel to the sibling node for if1/ep82 (reusing the devId; the sibling node
+    answers no control). Each ChannelMux's reader thread demuxes replies by seq and
+    completes kernel URBs asynchronously the instant a report lands, so every
+    endpoint stays crisp. The Hub claims the sibling node so it is not also
+    exported as a standalone busid.
 """
 from __future__ import annotations
 
@@ -42,7 +46,8 @@ class Device:
 
     def __init__(self, host: str, client_ip: str, device_mac: bytes,
                  node: str, busid: str, busnum: int, devnum: int,
-                 vid: int = 0, pid: int = 0, udp=None, bc=None, lock=None):
+                 vid: int = 0, pid: int = 0, udp=None, bc=None, lock=None,
+                 siblings: tuple[str, ...] = (), hub=None):
         self.host = host
         self.client_ip = client_ip
         self.device_mac = device_mac
@@ -55,14 +60,22 @@ class Device:
         self._udp = udp        # shared persistent session socket (list + connect)
         self._bc = bc          # shared persistent grant socket (client_ip:19540)
         self._lock = lock      # serialize attaches across the shared session socket
+        # ordered same-VID:PID node names (this node first); a composite device's
+        # interfaces are split across these (dev02=if0, dev03=if1, ...).
+        self.siblings = siblings
+        self.hub = hub         # for claiming sibling nodes as secondary channels
         self.client: SxuptpClient | None = None
         self.info: u.UsbipDevice | None = None
         self.resolved_dev_id: int | None = None
         self.ep_info: dict[int, tuple[int, int]] = {}
+        self.ep_mps: dict[int, int] = {}
+        self.ep_iface: dict[int, int] = {}     # endpoint addr -> interface index
         self.single_cfg: bytes | None = None
         self.composite: bool = False
         self.intr_in_eps: list[int] = []
-        self.mux = None                        # ChannelMux in composite mode
+        self.mux = None                        # primary ChannelMux (control + if0)
+        self._secondary: list = []             # [(SxuptpClient, ChannelMux), ...]
+        self.ep_mux: dict[int, object] = {}    # interrupt ep addr -> owning mux
 
     # --- lifecycle ------------------------------------------------------
     def attach(self, exclude: tuple[int, ...] = ()) -> u.UsbipDevice:
@@ -119,16 +132,16 @@ class Device:
             # every endpoint. `cut` marks the start of the 2nd interface (used only
             # for the single-interface fallback below).
             cut = len(full)
-            seen_iface = False
+            iface_idx = -1
             i = 0
             while i + 1 < len(full):
                 blen, btype = full[i], full[i + 1]
                 if blen == 0:
                     break
                 if btype == 0x04:                            # INTERFACE descriptor
-                    if seen_iface and cut == len(full):
+                    iface_idx += 1
+                    if iface_idx == 1 and cut == len(full):
                         cut = i                              # start of 2nd interface
-                    seen_iface = True
                     if i + 8 < len(full):
                         interfaces.append((full[i + 5], full[i + 6], full[i + 7]))
                 elif btype == 0x05 and i + 6 < len(full):    # ENDPOINT descriptor
@@ -138,19 +151,23 @@ class Device:
                     interval = full[i + 6]
                     self.ep_info[addr] = (attr, interval)
                     self.ep_mps[addr] = mps
+                    self.ep_iface[addr] = max(iface_idx, 0)
                     max_ep_mps = max(max_ep_mps, mps)
                     if attr == 3 and (addr & 0x80):
                         self.intr_in_eps.append(addr)
                 i += blen
 
-            # A composite HID device (e.g. this keyboard: ep81 keys + ep82
-            # consumer/media keys) has >1 interrupt-IN endpoint. The hub serves them
-            # all on this one channel; a ChannelMux (created after enumeration)
-            # demuxes the shared stream by seq so we can present the FULL device.
+            # A composite HID device (e.g. this keyboard: if0=ep81 keys, if1=ep82
+            # consumer/media keys) has >1 interrupt-IN endpoint, and the hub splits
+            # the interfaces across SEPARATE nodes/channels (dev02=if0, dev03=if1):
+            # ep82 reports arrive only on dev03's channel (verified in the driver
+            # capture). So in composite mode we present the FULL device, keep if0 on
+            # this (primary) channel, and open a secondary channel to the sibling
+            # node for each further interface's interrupt endpoint.
             # Otherwise (a lone extra interface with no interrupt-IN endpoint we
             # handle) fall back to presenting only interface 0 — cut the descriptor
             # at the 2nd INTERFACE so the kernel never polls the foreign endpoint.
-            self.composite = len(self.intr_in_eps) >= 2
+            self.composite = len(self.intr_in_eps) >= 2 and len(self.siblings) >= 2
             if not self.composite and cut < len(full):
                 single = bytearray(full[:cut])
                 single[2] = cut & 0xFF                       # wTotalLength (LE)
@@ -181,17 +198,64 @@ class Device:
             b_configuration_value=cfg_value, b_num_configurations=num_cfg or 1,
             b_num_interfaces=num_intf or 1, interfaces=interfaces)
 
-        # Composite HID: hand the channel to a mux that demuxes control + every
-        # interrupt endpoint by seq. After this point all channel I/O for this
-        # device goes through the mux (the reader thread owns the socket).
+        # Composite HID: the primary channel (this node) carries control + every
+        # interface-0 interrupt endpoint via a ChannelMux. Each FURTHER interface's
+        # interrupt endpoint lives on a sibling node, so open a secondary channel
+        # (fresh ephemeral CONNECT socket, reusing this device's devId — the
+        # sibling node does not answer control) with its own mux. After this the
+        # reader thread(s) own the socket(s).
         if self.composite:
             self.mux = ChannelMux(c)
             for ep in self.intr_in_eps:
-                attr, interval = self.ep_info[ep]
-                self.mux.register_intr(ep, self.ep_mps.get(ep, 8) or 8, interval)
+                iface = self.ep_iface.get(ep, 0)
+                interval = self.ep_info[ep][1]
+                length = self.ep_mps.get(ep, 8) or 8
+                if iface == 0:
+                    self.mux.register_intr(ep, length, interval)
+                    self.ep_mux[ep] = self.mux
+                else:
+                    smux = self._open_secondary(iface, c.dev_id)
+                    if smux is not None:
+                        smux.register_intr(ep, length, interval)
+                        self.ep_mux[ep] = smux
         return self.info
 
+    def _open_secondary(self, iface: int, dev_id: int):
+        """Attach the sibling node that carries interface `iface` and return a
+        ChannelMux for it (reusing dev_id; no control on the sibling). Marks the
+        sibling busid claimed so it is not exported independently."""
+        if iface >= len(self.siblings):
+            return None
+        node = self.siblings[iface]
+        sc = SxuptpClient(self.host)
+        if self._lock is not None:
+            self._lock.acquire()
+        try:
+            # own fresh ephemeral CONNECT socket (udp=None); shared grant socket.
+            sc.attach(node, self.device_mac, self.client_ip, udp=None, bc=self._bc)
+        finally:
+            if self._lock is not None:
+                self._lock.release()
+        sc._owns_udp = True
+        sc.dev_id = dev_id                       # reuse; sibling answers no control
+        if self.hub is not None:
+            self.hub.claim_node(node)            # hide its standalone busid
+        smux = ChannelMux(sc)
+        self._secondary.append((sc, smux))
+        return smux
+
     def detach(self) -> None:
+        for _sc, smux in self._secondary:
+            try:
+                smux.close()
+            except Exception:
+                pass
+        for sc, _smux in self._secondary:
+            try:
+                sc.disconnect()
+            except Exception:
+                pass
+        self._secondary = []
         if self.mux is not None:
             try:
                 self.mux.close()
@@ -206,23 +270,20 @@ class Device:
 
     # --- URB handling ---------------------------------------------------
     def is_async_interrupt(self, cmd: u.CmdSubmit) -> bool:
-        """True if this SUBMIT is an interrupt-IN the ChannelMux completes
+        """True if this SUBMIT is an interrupt-IN a ChannelMux completes
         asynchronously (so the URB loop must not reply inline)."""
-        if self.mux is None or not cmd.is_in:
+        if not cmd.is_in or (cmd.ep & 0x0F) == 0:
             return False
-        ep_num = cmd.ep & 0x0F
-        if ep_num == 0:
-            return False
-        ep_addr = ep_num | 0x80
-        return self.ep_info.get(ep_addr, (2, 0))[0] == 3
+        return ((cmd.ep & 0x0F) | 0x80) in self.ep_mux
 
     def enqueue_interrupt(self, cmd: u.CmdSubmit, complete) -> None:
-        """Hand an interrupt-IN URB to the mux; `complete(cmd, status, data)` is
-        invoked when a report arrives (status 0 = OK)."""
+        """Hand an interrupt-IN URB to its endpoint's mux; `complete(cmd, status,
+        data)` is invoked when a report arrives (status 0 = OK)."""
         ep_addr = (cmd.ep & 0x0F) | 0x80
-        self.mux.enqueue(ep_addr, cmd,
-                         lambda c, st, data: complete(
-                             c, 0 if st == 0 else EREMOTEIO, data if st == 0 else b""))
+        self.ep_mux[ep_addr].enqueue(
+            ep_addr, cmd,
+            lambda c, st, data: complete(
+                c, 0 if st == 0 else EREMOTEIO, data if st == 0 else b""))
 
     def submit(self, cmd: u.CmdSubmit) -> tuple[int, bytes]:
         """Execute a synchronous SUBMIT -> (usbip_status, in_data). status 0 = OK.
