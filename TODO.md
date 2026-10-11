@@ -24,6 +24,15 @@
   play/pause 0x00cd, next/prev 0x00b5/b6). FINAL STEP: a live press test to
   confirm event2 (Consumer Control) fires end to end through the bridge.
 - Graceful unplug -> USB/IP disconnect + optional auto-reattach (see #1).
+- Serial adapters (FTDI 0403:6001, PL2303 067b:2303): async bulk DONE (no
+  starvation; FTDI flood throttled; unlink guard). Both enumerate + bind
+  ftdi_sio/pl2303 + create ttyUSB; a direct SXUPTP-layer loopback moves bytes both
+  ways. REMAINING: the kernel drivers' open-time control sequence isn't bringing
+  the link up through the bridge (cold kernel open = 0 bytes, yet it worked right
+  after a manual SXUPTP init that set baud/DTR/RTS). Next: capture ftdi_sio/pl2303
+  open control transfers and verify each is effective through the mux (suspect a
+  set_control_lines / modem-ctrl / baud-divisor relay detail, or a control-vs-bulk
+  ordering at open). Primitives are proven; this is driver-init fidelity.
 - Interrupt OUT endpoints (not yet supported; HID keyboards don't need it).
 - Try a real multi-device session (keyboard + flash + the serial loopback pair)
   for concurrency behavior.
