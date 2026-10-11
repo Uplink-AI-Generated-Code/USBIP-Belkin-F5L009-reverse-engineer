@@ -233,7 +233,7 @@ class SxuptpClient:
         """One control transfer on an open channel -> (status, data). CONFIRMED."""
         if self.tcp is None:
             raise RuntimeError("not attached")
-        self.seq += 1
+        self.seq = (self.seq + 1) & 0xFFFF
         if setup.bmRequestType & 0x80:          # device -> host (read)
             req = p.control_read(dev_id, setup.bmRequestType, setup.bRequest,
                                  setup.wValue, setup.wIndex, setup.wLength, seq=self.seq)
@@ -304,7 +304,7 @@ class SxuptpClient:
         endpoint address (bit7=0). CONFIRMED path (pybelkusb bulk worked live)."""
         if self.tcp is None or self.dev_id is None:
             raise RuntimeError("not attached")
-        self.seq += 1
+        self.seq = (self.seq + 1) & 0xFFFF
         self.tcp.sendall(p.bulk_write(self.dev_id, ep_addr, data, seq=self.seq))
         self.tcp.settimeout(self.timeout)
         status, _ = self._recv_reply()
@@ -331,7 +331,7 @@ class SxuptpClient:
         remaining = length
         while remaining > 0:
             req = min(remaining, self._BULK_CHUNK)
-            self.seq += 1
+            self.seq = (self.seq + 1) & 0xFFFF
             self.tcp.sendall(p.bulk_read(self.dev_id, ep_addr, req, seq=self.seq))
             self.tcp.settimeout(self.timeout)
             status, data = self._recv_reply()
@@ -361,7 +361,7 @@ class SxuptpClient:
         if self.tcp is None or self.dev_id is None:
             raise RuntimeError("not attached")
         if self._intr_outstanding <= 0:
-            self.seq += 1
+            self.seq = (self.seq + 1) & 0xFFFF
             self.tcp.sendall(p.interrupt_read(self.dev_id, ep_addr, length,
                                               interval, seq=self.seq))
             self._intr_outstanding = 1
@@ -513,7 +513,7 @@ class ChannelMux:
     def _prime(self, ep: int) -> None:
         """Send one interrupt_read for `ep` (caller holds _lock)."""
         length, interval = self._ep_cfg[ep]
-        self.c.seq += 1
+        self.c.seq = (self.c.seq + 1) & 0xFFFF
         seq = self.c.seq
         self._seq_ep[seq] = ep
         self.c.tcp.sendall(p.interrupt_read(self.c.dev_id, ep, length, interval, seq=seq))
@@ -563,7 +563,7 @@ class ChannelMux:
                 if self._err:
                     cb = (urb, complete)
                 else:
-                    self.c.seq += 1
+                    self.c.seq = (self.c.seq + 1) & 0xFFFF
                     seq = self.c.seq
                     self._bulk_pending[seq] = (urb, complete, ep)
                     self.c.tcp.sendall(p.bulk_read(self.c.dev_id, ep, length, seq=seq))
@@ -584,7 +584,7 @@ class ChannelMux:
         with self._lock:
             if self._err:
                 raise self._err
-            self.c.seq += 1
+            self.c.seq = (self.c.seq + 1) & 0xFFFF
             seq = self.c.seq
             self._ctrl[seq] = [ev, None]
             self.c.tcp.sendall(p.bulk_write(self.c.dev_id, ep, data, seq=seq))
@@ -604,7 +604,7 @@ class ChannelMux:
         with self._lock:
             if self._err:
                 raise self._err
-            self.c.seq += 1
+            self.c.seq = (self.c.seq + 1) & 0xFFFF
             seq = self.c.seq
             self._ctrl[seq] = [ev, None]
             if setup.bmRequestType & 0x80:
