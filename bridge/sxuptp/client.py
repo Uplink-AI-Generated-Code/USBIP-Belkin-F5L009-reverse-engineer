@@ -9,6 +9,7 @@ Belkin F5L009 hub (see ../SXUPTP_PROTOCOL.md).
 from __future__ import annotations
 
 import collections
+import os
 import queue
 import socket
 import struct
@@ -301,14 +302,46 @@ class SxuptpClient:
 
     def bulk_out(self, ep_addr: int, data: bytes) -> int:
         """Bulk/interrupt OUT transfer -> status (0 = OK). ep_addr is a full USB
-        endpoint address (bit7=0). CONFIRMED path (pybelkusb bulk worked live)."""
+        endpoint address (bit7=0). CONFIRMED path (pybelkusb bulk worked live).
+
+        The SXUPTP size field is 16-bit, so a single request can carry at most
+        0xFFFF bytes; a larger buffer (e.g. a multi-sector mass-storage WRITE(10)
+        data phase, which the kernel issues up to ~120 KB at a time) overflows it
+        and wedges the device with -32. Split into 512-aligned chunks, the same
+        cap bulk_in uses, and send them back-to-back as one USB OUT stream."""
         if self.tcp is None or self.dev_id is None:
             raise RuntimeError("not attached")
-        self.seq = (self.seq + 1) & 0xFFFF
-        self.tcp.sendall(p.bulk_write(self.dev_id, ep_addr, data, seq=self.seq))
-        self.tcp.settimeout(self.timeout)
-        status, _ = self._recv_reply()
-        return status
+        if not data:
+            self.seq = (self.seq + 1) & 0xFFFF
+            self.tcp.sendall(p.bulk_write(self.dev_id, ep_addr, data, seq=self.seq))
+            self.tcp.settimeout(self.timeout)
+            status, _ = self._recv_reply()
+            return status
+        off = 0
+        while off < len(data):
+            chunk = data[off:off + self._BULK_CHUNK]
+            # On a sustained write the device's write-back cache fills and it NAKs
+            # its bulk-OUT pipe; the hub gives up and returns an error. Pause to let
+            # the flash flush, then resend the same chunk (the hub delivers a chunk
+            # all-or-nothing, so a resend does not duplicate bytes). A steady
+            # inter-chunk pace keeps the cache from filling in the first place.
+            deadline = time.monotonic() + self._bulk_retry_window
+            pause = self._bulk_recover
+            while True:
+                self.seq = (self.seq + 1) & 0xFFFF
+                self.tcp.sendall(p.bulk_write(self.dev_id, ep_addr, chunk, seq=self.seq))
+                self.tcp.settimeout(self.timeout)
+                status, _ = self._recv_reply()
+                if status == p.STATUS_OK:
+                    break
+                if time.monotonic() > deadline:
+                    return status
+                time.sleep(pause)
+                pause = min(pause * 1.5, 1.0)
+            off += len(chunk)
+            if self._bulk_pace:
+                time.sleep(self._bulk_pace)
+        return p.STATUS_OK
 
     # Per-request cap for bulk IN. Must be 512-aligned: one SXUPTP bulk_read maps
     # to one USB bulk IN of this many bytes, and a non-512-aligned size corrupts
@@ -316,19 +349,40 @@ class SxuptpClient:
     # field is 16-bit, so this is the largest 512-multiple that fits.
     _BULK_CHUNK = 0xFE00   # 65024 = 127 * 512
 
+    # A small default pause after each bulk-OUT chunk holds sustained mass-storage
+    # writes below the rate at which this old hub/flash NAKs and wedges; 0.005
+    # wrote 32 MB cleanly in testing, and it adds only one pause per 64 KB
+    # (negligible for ordinary writes). Tunable via SXBULK_PACE (seconds); 0 = off.
+    _bulk_pace = float(os.environ.get("SXBULK_PACE", "0.005") or 0)
+    # On a bulk-OUT the hub rejects (device write-cache briefly full), pause and
+    # resend the same chunk (the hub delivers a chunk all-or-nothing, so a resend
+    # never duplicates bytes), backing off up to 1s, until this window elapses.
+    # This rides out a transient flush stall. The window is deliberately short: a
+    # device that has truly wedged does not recover by resending, and hammering a
+    # wedged slot only prolongs it, so we fail the I/O promptly instead.
+    _bulk_recover = float(os.environ.get("SXBULK_RECOVER", "0.05") or 0)
+    _bulk_retry_window = float(os.environ.get("SXBULK_RETRY_WINDOW", "1.5") or 0)
+
     def bulk_in(self, ep_addr: int, length: int) -> tuple[int, bytes]:
         """Bulk/interrupt IN transfer -> (status, data). ep_addr has bit7=1 (IN).
 
         One SXUPTP bulk_read = one USB bulk IN of the requested size; the firmware
-        returns the actual bytes (verified: a 4096-byte read came back whole). A
-        reply SHORTER than requested is a USB short packet = end of transfer, so we
-        stop (re-requesting would pull the next transfer's bytes, e.g. a CSW, and
-        desync mass storage). Larger transfers are split into 512-aligned chunks.
+        returns the actual bytes (verified: a 4096-byte read came back whole).
+
+        A **non-zero** reply shorter than requested is a USB short packet = end of
+        transfer, so we stop (re-requesting would pull the next transfer's bytes,
+        e.g. a CSW, and desync mass storage). A **zero-length** reply is different:
+        it is the device NAKing because data is not ready yet — notably the CSW
+        after a mass-storage WRITE, while the flash commits. Treating that as a
+        short packet would hand the kernel a 0-byte CSW (-> I/O error), so we
+        instead retry until data arrives or a deadline passes. Larger transfers are
+        split into 512-aligned chunks.
         """
         if self.tcp is None or self.dev_id is None:
             raise RuntimeError("not attached")
         out = b""
         remaining = length
+        deadline = time.monotonic() + max(self.timeout, 5.0)
         while remaining > 0:
             req = min(remaining, self._BULK_CHUNK)
             self.seq = (self.seq + 1) & 0xFFFF
@@ -337,9 +391,14 @@ class SxuptpClient:
             status, data = self._recv_reply()
             if status != p.STATUS_OK:
                 return status, out
+            if not data:                     # NAK: no data yet (e.g. CSW committing)
+                if time.monotonic() > deadline:
+                    break
+                time.sleep(0.002)
+                continue
             out += data
             remaining -= len(data)
-            if len(data) < req:              # USB short packet => transfer complete
+            if len(data) < req:              # non-zero short packet => transfer complete
                 break
         return p.STATUS_OK, out
 
