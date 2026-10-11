@@ -10,6 +10,10 @@ from two shipping images and is implemented, with a round-trip self-test, in
 > **confirmed** was verified byte-for-byte against both samples below. One
 > header byte remains **unidentified**. Field names are descriptive, not
 > official.
+>
+> This document is the *specification*. For **how the format and the XOR key were
+> worked out** — the methodology, with reproducible evidence — see
+> [`DISCOVERY.md`](DISCOVERY.md).
 
 ## Samples analysed
 

@@ -108,7 +108,9 @@ has a 12-byte big-endian header (`checksum, type, seq, flags, addr_lo, length`)
 and XOR-obfuscated data; the key cycles through `C3 F3 BC 8A CC E5 D7 9F` by
 `(seq-1) % 8`. Three checksum layers protect it (per-record backward chain, a
 seed echo, and a whole-file checksum). Full details in
-[`FORMAT.md`](proprietary-Belkin-Silex/FORMAT.md).
+[`FORMAT.md`](proprietary-Belkin-Silex/FORMAT.md); **how the format and the XOR
+key were discovered** (methodology, with reproducible evidence) is in
+[`DISCOVERY.md`](proprietary-Belkin-Silex/DISCOVERY.md).
 
 ## The firmware analysis
 
@@ -123,6 +125,7 @@ proprietary-Belkin-Silex/
 ├── SX-2000U2_v2.1.5.bin            Silex firmware (test fixture)
 ├── fw_codec.py                     .VUP encode/decode/repack tool
 ├── FORMAT.md                       the .VUP container specification
+├── DISCOVERY.md                    how the format + XOR key were reverse-engineered
 └── analysis/
     ├── CROSS_VERSION_DIFF.md       v1.2.0 vs v2.1.5
     ├── F5L009_v1.2.0/
@@ -166,6 +169,7 @@ proprietary-Belkin-Silex/
 | [`proprietary-Belkin-Silex/`](proprietary-Belkin-Silex/) | Vendor firmware + everything derived from it (below) |
 | [`…/fw_codec.py`](proprietary-Belkin-Silex/fw_codec.py) | Encode/decode/repack tool for `.VUP` images (+ self-test) |
 | [`…/FORMAT.md`](proprietary-Belkin-Silex/FORMAT.md) | The reverse-engineered `.VUP` container specification |
+| [`…/DISCOVERY.md`](proprietary-Belkin-Silex/DISCOVERY.md) | How the `.VUP` format & XOR key were discovered (methodology) |
 | `…/F5L009_v1.2.0.bin`, `…/SX-2000U2_v2.1.5.bin` | Firmware images (test fixtures) |
 | [`…/analysis/`](proprietary-Belkin-Silex/analysis/) | Static + dynamic analysis of both images |
 | [`TODO.md`](TODO.md) | Remaining bridge work |
