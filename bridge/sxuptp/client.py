@@ -462,35 +462,40 @@ class SxuptpClient:
 
 
 class ChannelMux:
-    """Multiplex control + several interrupt endpoints over ONE attached channel.
+    """Multiplex control + interrupt + bulk over ONE attached SXUPTP channel.
 
-    The hub serves every endpoint of a composite device (e.g. a keyboard's ep81
-    keys and ep82 consumer/media keys) on the same SXUPTP channel, and replies
-    echo the request's seq in strict FIFO order. A single-threaded URB loop cannot
-    block on one interrupt endpoint without starving the other, so this owns the
+    The hub serves every endpoint of a device on its node's channel and replies
+    echo the request's seq; crucially the device replies OUT OF ORDER by seq (a
+    blocked bulk-IN read does NOT hold up a later control reply — verified live).
+    A single-threaded URB loop would stall on any blocking read, so this owns the
     channel after enumeration: one reader thread drains every reply and demuxes by
     seq —
 
-      * interrupt reports -> the matching endpoint; the kernel's pending URB for
-        that endpoint is completed via its callback, and one read is kept
-        outstanding (resubmitted) so reports are delivered the instant they
-        arrive (no polling, no latency, no 0-length churn);
-      * control replies -> the waiting control() caller.
+      * interrupt reports -> the matching endpoint; the kernel's pending URB is
+        completed via its callback, and one read is kept outstanding (resubmitted)
+        so reports arrive the instant they're ready (no polling, no latency);
+      * bulk-IN replies -> the kernel URB that issued that read (one read per URB;
+        a serial RX read may park for a long time with no data, which is exactly
+        why it must be async — it must not stall control/TX on the same channel);
+      * control and bulk-OUT replies -> the waiting synchronous caller.
 
     Sends on the SXUPTP socket are serialized with `_lock`; the reader only
-    receives. The URB-completion callbacks send on the (separate) USB/IP socket,
-    which the server serializes independently.
+    receives. URB-completion callbacks send on the (separate) USB/IP socket, which
+    the server serializes independently.
     """
 
     def __init__(self, client: SxuptpClient):
         self.c = client
         self._lock = threading.Lock()
-        self._ep_cfg: dict[int, tuple[int, int]] = {}      # ep -> (length, interval)
-        self._primed: set[int] = set()                     # eps with a read outstanding
-        self._seq_ep: dict[int, int] = {}                  # outstanding read seq -> ep
-        self._pending: dict[int, "collections.deque"] = {} # ep -> URBs awaiting a report
-        self._reports: dict[int, "collections.deque"] = {} # ep -> reports awaiting a URB
-        self._ctrl: dict[int, list] = {}                   # control seq -> [Event, result]
+        self._ep_cfg: dict[int, tuple[int, int]] = {}      # intr ep -> (length, interval)
+        self._primed: set[int] = set()                     # intr eps with a read outstanding
+        self._seq_ep: dict[int, int] = {}                  # outstanding intr read seq -> ep
+        self._pending: dict[int, "collections.deque"] = {} # intr ep -> URBs awaiting a report
+        self._reports: dict[int, "collections.deque"] = {} # intr ep -> reports awaiting a URB
+        self._bulk_in: set[int] = set()                    # registered bulk-IN eps
+        self._bulk_pending: dict[int, tuple] = {}          # bulk read seq -> (urb, complete, ep)
+        self._next_read_at: dict[int, float] = {}          # bulk ep -> earliest next read (throttle)
+        self._ctrl: dict[int, list] = {}                   # control/bulk-out seq -> [Event, result]
         self._err: Exception | None = None
         self._alive = True
         self._t = threading.Thread(target=self._reader, daemon=True)
@@ -500,6 +505,9 @@ class ChannelMux:
         self._ep_cfg[ep_addr] = (length or 8, interval or 10)
         self._pending[ep_addr] = collections.deque()
         self._reports[ep_addr] = collections.deque()
+
+    def register_bulk_in(self, ep_addr: int) -> None:
+        self._bulk_in.add(ep_addr)
 
     # --- interrupt (async) ----------------------------------------------
     def _prime(self, ep: int) -> None:
@@ -536,6 +544,60 @@ class ChannelMux:
         with self._lock:
             self._pending.get(ep, collections.deque()).clear()
 
+    # --- bulk IN (async) ------------------------------------------------
+    # Some adapters (FTDI) answer every bulk-IN read instantly with 2 modem-status
+    # bytes and no data, so an async read-per-URB would spin as fast as the kernel
+    # resubmits, pegging the CPU and starving other devices. We throttle: after a
+    # read returns no real payload, defer the next read on that endpoint by this
+    # much (~the FTDI latency-timer cadence). Reads carrying data are not delayed.
+    _BULK_IDLE_DELAY = 0.010
+    _BULK_EMPTY = 2          # <= this many bytes is "status only / empty"
+
+    def enqueue_bulk_in(self, ep: int, urb, complete, length: int) -> None:
+        """Register a kernel bulk-IN URB: issue ONE bulk_read(length) and complete
+        the URB (`complete(urb, status, data)`) when its reply arrives. A reply
+        shorter than `length` is a USB short packet = the data for this URB (normal
+        for a serial stream), not an error. Throttled per endpoint (see above)."""
+        def send():
+            with self._lock:
+                if self._err:
+                    cb = (urb, complete)
+                else:
+                    self.c.seq += 1
+                    seq = self.c.seq
+                    self._bulk_pending[seq] = (urb, complete, ep)
+                    self.c.tcp.sendall(p.bulk_read(self.c.dev_id, ep, length, seq=seq))
+                    cb = None
+            if cb is not None:
+                cb[1](cb[0], EREMOTEIO_, b"")
+        delay = self._next_read_at.get(ep, 0.0) - time.monotonic()
+        if delay > 0:
+            threading.Timer(delay, send).start()
+        else:
+            send()
+
+    # --- bulk OUT (synchronous) -----------------------------------------
+    def bulk_out(self, ep: int, data: bytes, timeout: float = 3.0) -> int:
+        """Write a bulk-OUT transfer, waiting for its ack (by seq). Returns status.
+        The ack returns promptly even while a bulk-IN read is parked."""
+        ev = threading.Event()
+        with self._lock:
+            if self._err:
+                raise self._err
+            self.c.seq += 1
+            seq = self.c.seq
+            self._ctrl[seq] = [ev, None]
+            self.c.tcp.sendall(p.bulk_write(self.c.dev_id, ep, data, seq=seq))
+        if not ev.wait(timeout):
+            with self._lock:
+                self._ctrl.pop(seq, None)
+            raise TimeoutError("bulk-out transfer timed out")
+        with self._lock:
+            res = self._ctrl.pop(seq, None)
+        if self._err:
+            raise self._err
+        return res[1][0]                                   # status
+
     # --- control (synchronous) ------------------------------------------
     def control(self, setup: p.Setup, data: bytes = b"", timeout: float = 3.0) -> tuple[int, bytes]:
         ev = threading.Event()
@@ -570,7 +632,7 @@ class ChannelMux:
                 done = None
                 with self._lock:
                     ep = self._seq_ep.pop(seq, None)
-                    if ep is not None:
+                    if ep is not None:                  # interrupt report
                         self._primed.discard(ep)
                         pend = self._pending[ep]
                         if pend:
@@ -579,7 +641,14 @@ class ChannelMux:
                         else:
                             self._reports[ep].append((status, data))
                         self._prime(ep)                 # keep one outstanding
-                    else:
+                    elif seq in self._bulk_pending:     # bulk-IN reply
+                        urb, complete, bep = self._bulk_pending.pop(seq)
+                        if len(data) <= self._BULK_EMPTY:  # no real payload -> pace
+                            self._next_read_at[bep] = time.monotonic() + self._BULK_IDLE_DELAY
+                        else:
+                            self._next_read_at[bep] = 0.0
+                        done = (complete, urb, status, data)
+                    else:                               # control / bulk-out ack
                         w = self._ctrl.get(seq)
                         if w is not None:
                             w[1] = (status, data)
@@ -595,6 +664,8 @@ class ChannelMux:
                 pend_all = [(c, u) for dq in self._pending.values() for (u, c) in dq]
                 for dq in self._pending.values():
                     dq.clear()
+                pend_all += [(cb, urb) for urb, cb, _ep in self._bulk_pending.values()]
+                self._bulk_pending.clear()
             for complete, urb in pend_all:
                 try:
                     complete(urb, EREMOTEIO_, b"")

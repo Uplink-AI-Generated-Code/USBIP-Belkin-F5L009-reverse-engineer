@@ -72,7 +72,10 @@ class Device:
         self.ep_iface: dict[int, int] = {}     # endpoint addr -> interface index
         self.single_cfg: bytes | None = None
         self.composite: bool = False
+        self.use_mux: bool = False
         self.intr_in_eps: list[int] = []
+        self.bulk_in_eps: list[int] = []
+        self._async_eps: list[int] = []
         self.mux = None                        # primary ChannelMux (control + if0)
         self._secondary: list = []             # [(SxuptpClient, ChannelMux), ...]
         self.ep_mux: dict[int, object] = {}    # interrupt ep addr -> owning mux
@@ -121,8 +124,9 @@ class Device:
         # A single-interface config descriptor we present to the kernel (see
         # self.single_cfg below); None until synthesized.
         self.single_cfg: bytes | None = None
-        # All interrupt-IN endpoint addrs, in descriptor order (ep81, ep82, ...).
+        # async-read endpoint addrs, in descriptor order (interrupt-IN, bulk-IN).
         self.intr_in_eps: list[int] = []
+        self.bulk_in_eps: list[int] = []
         self.ep_mps: dict[int, int] = {}       # endpoint addr -> wMaxPacketSize
         self.composite = False
         if total > 9:
@@ -153,22 +157,32 @@ class Device:
                     self.ep_mps[addr] = mps
                     self.ep_iface[addr] = max(iface_idx, 0)
                     max_ep_mps = max(max_ep_mps, mps)
-                    if attr == 3 and (addr & 0x80):
-                        self.intr_in_eps.append(addr)
+                    if addr & 0x80:
+                        if attr == 3:
+                            self.intr_in_eps.append(addr)
+                        elif attr == 2:
+                            self.bulk_in_eps.append(addr)
                 i += blen
 
-            # A composite HID device (e.g. this keyboard: if0=ep81 keys, if1=ep82
-            # consumer/media keys) has >1 interrupt-IN endpoint, and the hub splits
-            # the interfaces across SEPARATE nodes/channels (dev02=if0, dev03=if1):
-            # ep82 reports arrive only on dev03's channel (verified in the driver
-            # capture). So in composite mode we present the FULL device, keep if0 on
-            # this (primary) channel, and open a secondary channel to the sibling
-            # node for each further interface's interrupt endpoint.
-            # Otherwise (a lone extra interface with no interrupt-IN endpoint we
-            # handle) fall back to presenting only interface 0 — cut the descriptor
-            # at the 2nd INTERFACE so the kernel never polls the foreign endpoint.
-            self.composite = len(self.intr_in_eps) >= 2 and len(self.siblings) >= 2
-            if not self.composite and cut < len(full):
+            # Endpoints whose reads can block and must run async through a
+            # ChannelMux: interrupt-IN (HID reports) and bulk-IN (serial RX parks
+            # with no data). Mass storage (class 0x08) stays on the synchronous
+            # bulk path (request/response, never idle-blocks) — don't disturb it.
+            mass_storage = any(cls == 0x08 for cls, _, _ in interfaces)
+            async_eps = [] if mass_storage else (self.intr_in_eps + self.bulk_in_eps)
+            # The hub splits a composite device's interfaces across SEPARATE
+            # nodes/channels (keyboard: dev02=if0/ep81, dev03=if1/ep82) and delivers
+            # each endpoint's reports only on its own node's channel. So if any
+            # async endpoint lives on interface >=1 AND we have the sibling nodes for
+            # it, go composite: present the FULL device and open a secondary channel
+            # per further interface. If a foreign interface's endpoint has no sibling
+            # node to reach it, fall back to presenting only interface 0 (truncate
+            # the descriptor) so the kernel never polls an unreachable endpoint.
+            foreign = [e for e in async_eps if self.ep_iface.get(e, 0) >= 1]
+            reachable = all(self.ep_iface[e] < len(self.siblings) for e in foreign)
+            self.composite = bool(foreign) and reachable
+            self.use_mux = bool(async_eps) and (not foreign or self.composite)
+            if foreign and not reachable and cut < len(full):
                 single = bytearray(full[:cut])
                 single[2] = cut & 0xFF                       # wTotalLength (LE)
                 single[3] = (cut >> 8) & 0xFF
@@ -176,6 +190,10 @@ class Device:
                 self.single_cfg = bytes(single)
                 num_intf = 1
                 interfaces = interfaces[:1]
+                async_eps = [e for e in async_eps if self.ep_iface.get(e, 0) == 0]
+                self.use_mux = bool(async_eps)
+                self.composite = False
+            self._async_eps = async_eps
 
         # Derive the USB speed the hub must advertise to the client, so the vhci
         # does not clamp maxpacket (full-speed + 512-byte bulk EPs -> EPIPE loop)
@@ -205,26 +223,30 @@ class Device:
             b_configuration_value=cfg_value, b_num_configurations=num_cfg or 1,
             b_num_interfaces=num_intf or 1, interfaces=interfaces)
 
-        # Composite HID: the primary channel (this node) carries control + every
-        # interface-0 interrupt endpoint via a ChannelMux. Each FURTHER interface's
-        # interrupt endpoint lives on a sibling node, so open a secondary channel
-        # (fresh ephemeral CONNECT socket, reusing this device's devId — the
-        # sibling node does not answer control) with its own mux. After this the
-        # reader thread(s) own the socket(s).
-        if self.composite:
+        # The primary channel (this node) carries control, bulk-OUT, and every
+        # interface-0 async-IN endpoint (interrupt + bulk) via a ChannelMux. A
+        # composite device's FURTHER interfaces live on sibling nodes, so open a
+        # secondary channel per such interface (fresh ephemeral CONNECT socket,
+        # reusing this device's devId — the sibling node answers no control) with
+        # its own mux. After this the reader thread(s) own the socket(s).
+        if self.use_mux:
             self.mux = ChannelMux(c)
-            for ep in self.intr_in_eps:
+            secondary: dict[int, object] = {}
+            for ep in self._async_eps:
                 iface = self.ep_iface.get(ep, 0)
-                interval = self.ep_info[ep][1]
-                length = self.ep_mps.get(ep, 8) or 8
                 if iface == 0:
-                    self.mux.register_intr(ep, length, interval)
-                    self.ep_mux[ep] = self.mux
+                    mux = self.mux
                 else:
-                    smux = self._open_secondary(iface, c.dev_id)
-                    if smux is not None:
-                        smux.register_intr(ep, length, interval)
-                        self.ep_mux[ep] = smux
+                    mux = secondary.get(iface) or self._open_secondary(iface, c.dev_id)
+                    if mux is None:
+                        continue
+                    secondary[iface] = mux
+                if ep in self.intr_in_eps:
+                    mux.register_intr(ep, self.ep_mps.get(ep, 8) or 8,
+                                      self.ep_info[ep][1])
+                else:
+                    mux.register_bulk_in(ep)
+                self.ep_mux[ep] = mux
         return self.info
 
     def _open_secondary(self, iface: int, dev_id: int):
@@ -276,27 +298,32 @@ class Device:
                 self.client = None
 
     # --- URB handling ---------------------------------------------------
-    def is_async_interrupt(self, cmd: u.CmdSubmit) -> bool:
-        """True if this SUBMIT is an interrupt-IN a ChannelMux completes
-        asynchronously (so the URB loop must not reply inline)."""
+    def is_async(self, cmd: u.CmdSubmit) -> bool:
+        """True if this SUBMIT is an IN endpoint a ChannelMux completes
+        asynchronously (interrupt-IN or bulk-IN), so the URB loop must not reply
+        inline but hand it to enqueue_async."""
         if not cmd.is_in or (cmd.ep & 0x0F) == 0:
             return False
         return ((cmd.ep & 0x0F) | 0x80) in self.ep_mux
 
-    def enqueue_interrupt(self, cmd: u.CmdSubmit, complete) -> None:
-        """Hand an interrupt-IN URB to its endpoint's mux; `complete(cmd, status,
-        data)` is invoked when a report arrives (status 0 = OK)."""
+    def enqueue_async(self, cmd: u.CmdSubmit, complete) -> None:
+        """Hand an async IN URB (interrupt or bulk) to its endpoint's mux;
+        `complete(cmd, status, data)` runs when the reply arrives (status 0 = OK)."""
         ep_addr = (cmd.ep & 0x0F) | 0x80
-        self.ep_mux[ep_addr].enqueue(
-            ep_addr, cmd,
-            lambda c, st, data: complete(
-                c, 0 if st == 0 else EREMOTEIO, data if st == 0 else b""))
+        mux = self.ep_mux[ep_addr]
+        cb = (lambda c, st, data: complete(
+            c, 0 if st == 0 else EREMOTEIO, data if st == 0 else b""))
+        if ep_addr in self.intr_in_eps:
+            mux.enqueue(ep_addr, cmd, cb)
+        else:                                # bulk-IN
+            mux.enqueue_bulk_in(ep_addr, cmd, cb, cmd.transfer_buffer_length or 64)
 
     def submit(self, cmd: u.CmdSubmit) -> tuple[int, bytes]:
         """Execute a synchronous SUBMIT -> (usbip_status, in_data). status 0 = OK.
 
-        Interrupt-IN in composite (mux) mode is handled by enqueue_interrupt, not
-        here — see is_async_interrupt."""
+        Async IN endpoints (mux mode) are handled by enqueue_async, not here —
+        see is_async. This path serves control, bulk-OUT, and the non-mux
+        synchronous interrupt/bulk IN fallbacks."""
         if self.client is None:
             return EPIPE, b""
         ep_num = cmd.ep & 0x0F
@@ -305,6 +332,9 @@ class Device:
         ep_addr = (ep_num | 0x80) if cmd.is_in else ep_num
         attr, interval = self.ep_info.get(ep_addr, (2, 10))
         try:
+            if not cmd.is_in and self.mux is not None:      # bulk OUT (TX) via mux
+                status = self.mux.bulk_out(ep_addr, cmd.transfer_buffer)
+                return (0, b"") if status == 0 else (EREMOTEIO, b"")
             if attr == 3:                    # interrupt
                 if not cmd.is_in:
                     return EPIPE, b""        # interrupt OUT: unsupported for now
@@ -316,10 +346,10 @@ class Device:
                 except socket.timeout:
                     return 0, b""            # idle interval, no report -> resubmit
                 return (0, data) if status == 0 else (EREMOTEIO, b"")
-            if cmd.is_in:                    # bulk IN
+            if cmd.is_in:                    # bulk IN (non-mux: mass storage)
                 status, data = self.client.bulk_in(ep_addr, cmd.transfer_buffer_length)
                 return (0, data) if status == 0 else (EREMOTEIO, b"")
-            status = self.client.bulk_out(ep_addr, cmd.transfer_buffer)  # bulk OUT
+            status = self.client.bulk_out(ep_addr, cmd.transfer_buffer)  # bulk OUT (non-mux)
             return (0, b"") if status == 0 else (EREMOTEIO, b"")
         except Exception:
             return EPIPE, b""

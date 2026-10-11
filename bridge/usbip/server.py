@@ -170,10 +170,15 @@ class Handler(socketserver.BaseRequestHandler):
             dev.detach()
             print(f"[usbip] detached {busid}")
 
-    def _send_ret(self, cmd, status: int, data: bytes) -> None:
-        """Send one RET_SUBMIT. Serialized because interrupt completions arrive on
-        the mux reader thread while the loop may be sending other replies."""
+    def _complete_async(self, cmd, status: int, data: bytes) -> None:
+        """Complete an async (interrupt/bulk-IN) URB from the mux reader thread.
+        Dropped if the URB was already UNLINKed by the kernel — sending a
+        RET_SUBMIT for an unlinked seqnum makes the client drop the whole device
+        (seen with the FTDI, which unlinks its reads constantly)."""
         with self._send_lock:
+            if cmd.seqnum not in self._inflight:
+                return
+            self._inflight.discard(cmd.seqnum)
             try:
                 self.request.sendall(u.pack_ret_submit(cmd, status, data))
             except OSError:
@@ -181,6 +186,7 @@ class Handler(socketserver.BaseRequestHandler):
 
     def _urb_loop(self, dev: Device) -> None:
         self._send_lock = threading.Lock()
+        self._inflight: set[int] = set()        # seqnums of async URBs awaiting completion
         while True:
             try:
                 hdr = self._recvall(u.CMD_HDR_LEN)
@@ -190,14 +196,23 @@ class Handler(socketserver.BaseRequestHandler):
             if command == u.USBIP_CMD_SUBMIT:
                 if not cmd.is_in and cmd.transfer_buffer_length:
                     cmd.transfer_buffer = self._recvall(cmd.transfer_buffer_length)
-                if dev.is_async_interrupt(cmd):
-                    # completed later, on the mux reader thread, when a report lands
-                    dev.enqueue_interrupt(cmd, self._send_ret)
+                if dev.is_async(cmd):
+                    # completed later, on the mux reader thread, when the reply lands
+                    with self._send_lock:
+                        self._inflight.add(cmd.seqnum)
+                    dev.enqueue_async(cmd, self._complete_async)
                 else:
                     status, data = dev.submit(cmd)
-                    self._send_ret(cmd, status, data)
+                    with self._send_lock:
+                        try:
+                            self.request.sendall(u.pack_ret_submit(cmd, status, data))
+                        except OSError:
+                            pass
             elif command == u.USBIP_CMD_UNLINK:
+                # Cancel the victim async URB so its (now stale) completion is
+                # dropped, then ack the unlink.
                 with self._send_lock:
+                    self._inflight.discard(cmd.unlink_seqnum)
                     try:
                         self.request.sendall(u.pack_ret_unlink(cmd, 0))
                     except OSError:
