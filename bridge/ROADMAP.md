@@ -17,8 +17,8 @@ exporter**.
 ## What we already have
 
 - `fw_codec.py`, decoded + unpacked images, and **reconstructed RAM images** for
-  both firmwares (`analysis/*/ram_reconstructed.bin`, base 0, Thumb).
-- Labeled C runtime (`analysis/*/ram/symbols.txt`) — `printf`, `strcpy`,
+  both firmwares (`proprietary-Belkin-Silex/analysis/*/ram_reconstructed.bin`, base 0, Thumb).
+- Labeled C runtime (`proprietary-Belkin-Silex/analysis/*/ram/symbols.txt`) — `printf`, `strcpy`,
   `bswap16`/`ntohs`, `get_le16`, etc. — which makes the protocol handlers
   readable.
 - The SXUPTP code located in the image: the `SXUP_ALC` recv task (~`0x308464`),

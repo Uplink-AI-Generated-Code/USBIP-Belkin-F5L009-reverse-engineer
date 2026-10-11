@@ -1,7 +1,7 @@
 # SXUPTP protocol — reverse-engineering notes (living document)
 
 Derived statically from the reconstructed F5L009 RAM image
-(`analysis/F5L009_v1.2.0/ram_reconstructed.bin`, base `0x0`, Thumb). **Incomplete
+(`proprietary-Belkin-Silex/analysis/F5L009_v1.2.0/ram_reconstructed.bin`, base `0x0`, Thumb). **Incomplete
 and partly inferred** — addresses and claims are updated as RE proceeds.
 Confidence is noted per item.
 
@@ -834,7 +834,7 @@ Until then, static RE can continue on the self-contained pieces: the discovery
 ## Method notes
 
 - Load `ram_reconstructed.bin` at base `0x0`, Thumb; import
-  `analysis/F5L009_v1.2.0/ram/symbols.txt` to get the libc names, then rename
+  `proprietary-Belkin-Silex/analysis/F5L009_v1.2.0/ram/symbols.txt` to get the libc names, then rename
   outward from the SXUPTP strings.
 - The SX-2000U2 v2.1.5 image has a richer `USBUPTP` sub-driver layer; once the
   v1.2.0 protocol is understood, diff against SX for the newer message set.

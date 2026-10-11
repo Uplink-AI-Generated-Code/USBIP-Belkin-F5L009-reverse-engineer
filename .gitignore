@@ -1,8 +1,9 @@
 # Raw vendor download: untrusted InstallShield installer + driver-CD zip.
-# The firmware image extracted from it is checked in as SX-2000U2_v2.1.5.bin.
-/SX-2000U2/
+# The firmware image extracted from it is checked in as
+# proprietary-Belkin-Silex/SX-2000U2_v2.1.5.bin.
+/proprietary-Belkin-Silex/SX-2000U2/
 
 # Large, noisy, regenerable linear disassembly sweeps
-analysis/*/disasm_full.asm
+proprietary-Belkin-Silex/analysis/*/disasm_full.asm
 # Unpack outputs (regenerable via `fw_codec.py unpack`)
 *.unpacked/

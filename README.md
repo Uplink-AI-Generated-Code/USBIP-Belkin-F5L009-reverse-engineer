@@ -81,9 +81,13 @@ disconnect, reservation-steal, isochronous).
 
 ## The firmware tooling
 
-`fw_codec.py` is pure-Python (stdlib only) and handles both firmware images:
+The vendor firmware and everything derived from it live under
+[`proprietary-Belkin-Silex/`](proprietary-Belkin-Silex/), kept separate from the
+bridge. `fw_codec.py` is pure-Python (stdlib only) and handles both firmware
+images (run from inside that directory):
 
 ```sh
+cd proprietary-Belkin-Silex
 python3 fw_codec.py selftest                       # verify against both fixtures
 python3 fw_codec.py decrypt F5L009_v1.2.0.bin out.dec.bin
 python3 fw_codec.py encrypt out.dec.bin out.bin    # symmetric (XOR)
@@ -103,7 +107,8 @@ and version strings, record count) followed by a chain of records. Each record
 has a 12-byte big-endian header (`checksum, type, seq, flags, addr_lo, length`)
 and XOR-obfuscated data; the key cycles through `C3 F3 BC 8A CC E5 D7 9F` by
 `(seq-1) % 8`. Three checksum layers protect it (per-record backward chain, a
-seed echo, and a whole-file checksum). Full details in [`FORMAT.md`](FORMAT.md).
+seed echo, and a whole-file checksum). Full details in
+[`FORMAT.md`](proprietary-Belkin-Silex/FORMAT.md).
 
 ## The firmware analysis
 
@@ -113,22 +118,27 @@ image is only a bootstrap that scatter-copies the real application into RAM and
 jumps to it in Thumb mode. See each product's `ram_reconstruction.md`.
 
 ```
-analysis/
-├── CROSS_VERSION_DIFF.md        v1.2.0 vs v2.1.5
-├── F5L009_v1.2.0/
-│   ├── report.md, vectors.txt, entry.asm, records.csv
-│   ├── strings.txt, strings_xref.txt, functions.txt
-│   ├── boot_trace.md            reset → MMU/cache → RAM copy → jump
-│   ├── ram_reconstruction.md    how the RAM image was emulated out
-│   ├── ram_reconstructed.bin    4 MB post-boot image (load at base 0, Thumb)
-│   ├── management_and_flash.md  telnet/web/JCP admin surface + flash/update path
-│   ├── ram_main.thumb.asm, ram_strings.txt
-│   └── ram/                     Thumb analysis of the RAM image
-│       ├── report.md, functions.txt, strings.txt, strings_xref.txt
-│       ├── hot_functions.thumb.asm
-│       ├── core_libs.md         labelled C runtime (printf/strcpy/memset/…)
-│       └── symbols.txt          Ghidra/IDA-importable names
-└── SX-2000U2_v2.1.5/            same layout
+proprietary-Belkin-Silex/
+├── F5L009_v1.2.0.bin                Belkin firmware (test fixture)
+├── SX-2000U2_v2.1.5.bin            Silex firmware (test fixture)
+├── fw_codec.py                     .VUP encode/decode/repack tool
+├── FORMAT.md                       the .VUP container specification
+└── analysis/
+    ├── CROSS_VERSION_DIFF.md       v1.2.0 vs v2.1.5
+    ├── F5L009_v1.2.0/
+    │   ├── report.md, vectors.txt, entry.asm, records.csv
+    │   ├── strings.txt, strings_xref.txt, functions.txt
+    │   ├── boot_trace.md           reset → MMU/cache → RAM copy → jump
+    │   ├── ram_reconstruction.md   how the RAM image was emulated out
+    │   ├── ram_reconstructed.bin   4 MB post-boot image (load at base 0, Thumb)
+    │   ├── management_and_flash.md telnet/web/JCP admin surface + flash/update path
+    │   ├── ram_main.thumb.asm, ram_strings.txt
+    │   └── ram/                    Thumb analysis of the RAM image
+    │       ├── report.md, functions.txt, strings.txt, strings_xref.txt
+    │       ├── hot_functions.thumb.asm
+    │       ├── core_libs.md        labelled C runtime (printf/strcpy/memset/…)
+    │       └── symbols.txt         Ghidra/IDA-importable names
+    └── SX-2000U2_v2.1.5/           same layout
 ```
 
 ### Key firmware findings
@@ -140,7 +150,7 @@ analysis/
   `DISH` debug shell.
 - **Management**: telnet in as `root` with no password; the web admin accepts an
   empty password; the hub reboots over HTTP (`/en/reset/exec.htm`) to clear a
-  stuck slot. See [`analysis/F5L009_v1.2.0/management_and_flash.md`](analysis/F5L009_v1.2.0/management_and_flash.md).
+  stuck slot. See [`management_and_flash.md`](proprietary-Belkin-Silex/analysis/F5L009_v1.2.0/management_and_flash.md).
 - **Shared codebase**: F5L009 and SX-2000U2 are the same Silex program; the C
   runtime maps `0x00336xxx ↔ 0x000D8xxx`. The main v1.2.0→v2.1.5 change is an
   expanded USB sub-driver framework. See the cross-version diff.
@@ -153,10 +163,11 @@ analysis/
 | [`bridge/SXUPTP_PROTOCOL.md`](bridge/SXUPTP_PROTOCOL.md) | The reverse-engineered SXUPTP wire protocol |
 | [`bridge/usbip/CLIENT.md`](bridge/usbip/CLIENT.md) | Linux / Docker USB/IP client recipe |
 | `Packet_Dumps/` | SXUPTP captures used to reverse the protocol |
-| [`fw_codec.py`](fw_codec.py) | Encode/decode/repack tool for `.VUP` images (+ self-test) |
-| [`FORMAT.md`](FORMAT.md) | The reverse-engineered `.VUP` container specification |
-| `F5L009_v1.2.0.bin`, `SX-2000U2_v2.1.5.bin` | Firmware images (test fixtures) |
-| [`analysis/`](analysis/) | Static + dynamic analysis of both images |
+| [`proprietary-Belkin-Silex/`](proprietary-Belkin-Silex/) | Vendor firmware + everything derived from it (below) |
+| [`…/fw_codec.py`](proprietary-Belkin-Silex/fw_codec.py) | Encode/decode/repack tool for `.VUP` images (+ self-test) |
+| [`…/FORMAT.md`](proprietary-Belkin-Silex/FORMAT.md) | The reverse-engineered `.VUP` container specification |
+| `…/F5L009_v1.2.0.bin`, `…/SX-2000U2_v2.1.5.bin` | Firmware images (test fixtures) |
+| [`…/analysis/`](proprietary-Belkin-Silex/analysis/) | Static + dynamic analysis of both images |
 | [`TODO.md`](TODO.md) | Remaining bridge work |
 
 ## Reproducing
@@ -165,10 +176,11 @@ analysis/
   Docker recipe in [`bridge/usbip/CLIENT.md`](bridge/usbip/CLIENT.md)). The
   protocol modules have stdlib-only self-tests: `python3 -m bridge.sxuptp.protocol`
   and `python3 -m bridge.usbip.protocol`.
-- **Firmware**: the committed `.bin` files are the only required inputs; all
-  `analysis/` artifacts regenerate with `fw_codec.py` plus Capstone (disassembly)
-  and Unicorn (boot emulation). Two large, regenerable outputs are git-ignored:
-  `analysis/*/disasm_full.asm` and `*.unpacked/`.
+- **Firmware** (everything under `proprietary-Belkin-Silex/`): the committed
+  `.bin` files are the only required inputs; all `analysis/` artifacts regenerate
+  with `fw_codec.py` plus Capstone (disassembly) and Unicorn (boot emulation). Two
+  large, regenerable outputs are git-ignored: `analysis/*/disasm_full.asm` and
+  `*.unpacked/`.
 
 ## Scope & caveats
 
