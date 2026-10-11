@@ -155,6 +155,9 @@ class SxuptpClient:
         self.seq = 0
         self.dev_id: int | None = None
 
+        self._rxbuf = b""          # persistent data-channel read buffer (framing)
+        self._intr_outstanding = 0 # interrupt_read submits sent but not yet answered
+
         self._owns_bc = bc is None
         if bc is None:
             bc = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -257,6 +260,34 @@ class SxuptpClient:
         data = self._recv_exact(size) if size else b""
         return status, data
 
+    def _read_reply(self, timeout: float) -> tuple[int, bytes]:
+        """Read one complete data-channel reply via a persistent buffer.
+
+        Every SXUPTP data-channel message is UNIFORMLY framed: a 10-byte header
+        (type, seq, status, reserved, size) followed by `size` data bytes. There
+        are no bare 6-byte ACKs (verified against a Windows-driver capture — a
+        keyboard report is a single 18-byte message: 10-byte header + 8 data).
+
+        Buffering across calls makes framing robust to TCP fragmentation and to a
+        `timeout` firing mid-message: on timeout the partial bytes stay in
+        `self._rxbuf` and the socket.timeout propagates, so the next call resumes
+        exactly where this one stopped instead of losing sync.
+        """
+        self.tcp.settimeout(timeout)
+        while True:
+            if len(self._rxbuf) >= p.CTRL_REPLY_HEADER:
+                size = struct.unpack_from(">H", self._rxbuf, 8)[0]
+                total = p.CTRL_REPLY_HEADER + size
+                if len(self._rxbuf) >= total:
+                    status = struct.unpack_from(">H", self._rxbuf, 4)[0]
+                    data = self._rxbuf[p.CTRL_REPLY_HEADER:total]
+                    self._rxbuf = self._rxbuf[total:]
+                    return status, data
+            chunk = self.tcp.recv(2048)      # socket.timeout keeps _rxbuf intact
+            if not chunk:
+                raise ConnectionError("peer closed during reply")
+            self._rxbuf += chunk
+
     def bulk_out(self, ep_addr: int, data: bytes) -> int:
         """Bulk/interrupt OUT transfer -> status (0 = OK). ep_addr is a full USB
         endpoint address (bit7=0). CONFIRMED path (pybelkusb bulk worked live)."""
@@ -307,33 +338,25 @@ class SxuptpClient:
         2), which is what actually polls an interrupt endpoint — `bulk_in`
         (category 3) hits the bulk/queue path and never delivers HID reports.
 
-        The device holds the request and replies when a report is available (a
-        key event), so this BLOCKS like a real interrupt URB; `timeout` bounds the
-        wait (None = self.timeout). Per request the device may send a short ACK
-        (6 bytes) then the report; we skip ACKs and return the first report.
+        With SET_IDLE the device reports only on change, so it HOLDS the request
+        and replies when a report is ready (a key event); `timeout` bounds the
+        wait (None = self.timeout) so the caller's URB loop stays responsive.
+
+        Exactly one interrupt_read is kept outstanding at the device: a timeout
+        does NOT resubmit (that would pile up unanswered reads and leave stale
+        reports in the stream) — we simply keep waiting on the one already in
+        flight. The reply is a single uniform 10-byte-header + `size` message.
         """
         if self.tcp is None or self.dev_id is None:
             raise RuntimeError("not attached")
-        self.seq += 1
-        self.tcp.sendall(p.interrupt_read(self.dev_id, ep_addr, length, interval,
-                                          seq=self.seq))
-        self.tcp.settimeout(self.timeout if timeout is None else timeout)
-        buf = b""
-        while True:
-            # a report is a 10-byte header (type,seq,status,_,size) + `size` bytes;
-            # a bare 6-byte (type,seq,0000) is an ACK to skip.
-            if len(buf) >= 10:
-                size = struct.unpack_from(">H", buf, 8)[0]
-                if size and len(buf) >= 10 + size:
-                    return struct.unpack_from(">H", buf, 4)[0], buf[10:10 + size]
-            if len(buf) >= 6 and struct.unpack_from(">H", buf, 4)[0] == 0 and \
-                    (len(buf) < 10 or struct.unpack_from(">H", buf, 8)[0] == 0):
-                buf = buf[6:]                # drop a 6-byte ACK
-                continue
-            chunk = self.tcp.recv(512)
-            if not chunk:
-                raise ConnectionError("peer closed during interrupt_in")
-            buf += chunk
+        if self._intr_outstanding <= 0:
+            self.seq += 1
+            self.tcp.sendall(p.interrupt_read(self.dev_id, ep_addr, length,
+                                              interval, seq=self.seq))
+            self._intr_outstanding = 1
+        status, data = self._read_reply(self.timeout if timeout is None else timeout)
+        self._intr_outstanding -= 1          # answered; next call resubmits
+        return status, data
 
     def find_dev_id(self, candidates: tuple[int, ...] = (1, 2, 3, 4, 5, 6, 7, 8, 0),
                     want_vid: int | None = None, want_pid: int | None = None,
