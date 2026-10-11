@@ -178,13 +178,20 @@ class Device:
                 interfaces = interfaces[:1]
 
         # Derive the USB speed the hub must advertise to the client, so the vhci
-        # does not clamp maxpacket (full-speed + 512-byte bulk EPs -> EPIPE loop).
-        #   512-byte endpoint  -> high speed
-        #   EP0 maxpacket == 8 -> low speed (e.g. the keyboards)
-        #   otherwise          -> full speed
+        # does not clamp maxpacket (full-speed + 512-byte bulk EPs -> EPIPE loop)
+        # nor coerce bulk endpoints to interrupt (low-speed has no bulk).
+        #   512-byte endpoint        -> high speed
+        #   has a BULK endpoint      -> full speed (low-speed can't do bulk; e.g.
+        #                               the FTDI/PL2303 serial adapters have EP0
+        #                               maxpacket 8 but are full-speed)
+        #   EP0 maxpacket == 8, no bulk -> low speed (e.g. the keyboards)
+        #   otherwise                -> full speed
         bmps0 = dd[7] if len(dd) > 7 else 64
+        has_bulk = any(attr == 2 for attr, _ in self.ep_info.values())
         if max_ep_mps >= 512:
             speed = u.SPEED_HIGH
+        elif has_bulk:
+            speed = u.SPEED_FULL
         elif bmps0 <= 8:
             speed = u.SPEED_LOW
         else:
