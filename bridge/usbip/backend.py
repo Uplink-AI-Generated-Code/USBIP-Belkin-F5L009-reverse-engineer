@@ -52,6 +52,7 @@ class Device:
         self.info: u.UsbipDevice | None = None
         self.resolved_dev_id: int | None = None
         self.ep_info: dict[int, tuple[int, int]] = {}
+        self.single_cfg: bytes | None = None
 
     # --- lifecycle ------------------------------------------------------
     def attach(self, exclude: tuple[int, ...] = ()) -> u.UsbipDevice:
@@ -94,24 +95,50 @@ class Device:
         max_ep_mps = 0
         # endpoint address -> (transfer_type, bInterval); type 3 = interrupt
         self.ep_info: dict[int, tuple[int, int]] = {}
+        # A single-interface config descriptor we present to the kernel (see
+        # self.single_cfg below); None until synthesized.
+        self.single_cfg: bytes | None = None
         if total > 9:
             full = c.control_transfer(sx.Setup.get_descriptor(desc_type=2, desc_index=0,
                                                              length=total))
+            # The hub splits a composite device's interfaces across SEPARATE nodes
+            # (dev02=interface0/ep81, dev03=interface1/ep82), each on its own SXUPTP
+            # channel. This busid is ONE node and serves only its first interface's
+            # endpoint; polling the other interface's EP on this channel corrupts it
+            # (verified: it drove the keyboard into a -32 reset loop). So we present
+            # only interface 0 to the client and cut `full` off at the 2nd INTERFACE
+            # descriptor, so the kernel never creates/polls the foreign interface.
+            cut = len(full)
+            seen_iface = False
             i = 0
             while i + 1 < len(full):
                 blen, btype = full[i], full[i + 1]
                 if blen == 0:
                     break
-                if btype == 0x04 and i + 8 < len(full):      # INTERFACE descriptor
-                    interfaces.append((full[i + 5], full[i + 6], full[i + 7]))
+                if btype == 0x04:                            # INTERFACE descriptor
+                    if seen_iface:
+                        cut = i                              # start of 2nd interface
+                        break
+                    seen_iface = True
+                    if i + 8 < len(full):
+                        interfaces.append((full[i + 5], full[i + 6], full[i + 7]))
                 elif btype == 0x05 and i + 6 < len(full):    # ENDPOINT descriptor
                     addr = full[i + 2]
                     attr = full[i + 3] & 0x03
                     mps = (full[i + 4] | (full[i + 5] << 8)) & 0x07FF
                     interval = full[i + 6]
-                    self.ep_info[addr] = (attr, interval)
+                    self.ep_info[addr] = (attr, interval)    # only interface 0's EPs
                     max_ep_mps = max(max_ep_mps, mps)
                 i += blen
+
+            if cut < len(full):
+                single = bytearray(full[:cut])
+                single[2] = cut & 0xFF                       # wTotalLength (LE)
+                single[3] = (cut >> 8) & 0xFF
+                single[4] = 1                                # bNumInterfaces = 1
+                self.single_cfg = bytes(single)
+                num_intf = 1
+                interfaces = interfaces[:1]
 
         # Derive the USB speed the hub must advertise to the client, so the vhci
         # does not clamp maxpacket (full-speed + 512-byte bulk EPs -> EPIPE loop).
@@ -177,6 +204,12 @@ class Device:
                          wIndex=w_index, wLength=w_length)
         try:
             if bm & 0x80:                    # IN
+                # Serve our single-interface config descriptor (hides the foreign
+                # interface whose EP lives on another node) instead of the device's
+                # real 2-interface one. wValue = (descType << 8) | index; 0x02 = CONFIG.
+                if (self.single_cfg is not None and b_req == 0x06
+                        and (w_value >> 8) == 0x02):
+                    return 0, self.single_cfg[:w_length]
                 data = self.client.control_transfer(setup)
                 return 0, data[:w_length]
             else:                            # OUT
