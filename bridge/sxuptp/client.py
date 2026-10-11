@@ -211,6 +211,11 @@ class SxuptpClient:
                     s.recv(1)      # RST raises; timeout => held open (matched)
                 except socket.timeout:
                     pass
+                # Arm an abortive (RST) close immediately, so the hub frees the
+                # job even if this process dies abruptly (kill -9 / crash) without
+                # calling disconnect() — not just on a graceful close().
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER,
+                             struct.pack("ii", 1, 0))
                 self.tcp = s
                 return self.dev_id
             except (ConnectionResetError, ConnectionAbortedError, OSError):
