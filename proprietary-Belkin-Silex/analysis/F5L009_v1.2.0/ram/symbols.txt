@@ -91,3 +91,17 @@
 # --- Telnet (port 23) ------------------------------------------------------
 # login root / empty password; admin flag at telnet_session+0x14 gates privileged
 # items ("You must login as an administrator." @0x383eb0, check @0x32f65a).
+
+# --- TCP stack (data channel, port 19540) ----------------------------------
+# See tcp_connection_and_keepalive.md. Conn state byte at conn+0xd6; FSM jump
+# table @0x37f98c (index = state-4). The ~60-70s sustained-transfer RST is the
+# keepalive/RTO-backoff timer, NOT the 6000 open-timer.
+0x00319558  tcp_input                 # TCP segment state machine; parse hdr, dispatch on [conn+0xd6]
+0x003159ec  tcp_set_state             # set conn state byte [conn+0xd6] (states 8/9 special)
+0x00316458  tcp_send_segment          # send a segment; arg r2 = TCP flags (0x02 SYN,0x04 RST,0x10 ACK,0x12 SYN-ACK)
+0x0031642c  tcp_rtt_arm               # arm RTT timing: [conn+0xf9]=1, t_rtseq[conn+0x104]=snd.una[conn+0x90], t_start[conn+0x108]=now
+0x00317820  tcp_rto_update            # RTT->RTO estimator; writes RTO/backoff [conn+0x118], clamp runtime min/max
+0x00318204  tcp_ack_process           # process ACK; RTT measure site @0x3187ce (gated t_rtt_active & recv_ack>=t_rtseq)
+0x003190ec  tcp_keepalive_tick        # per-conn timer: doubles [conn+0x118]; >limit(*0x2f2600) -> "#TCP:KeepAlive T/O" -> RST(flag4)@0x319494 -> set_state(1)
+0x00318c98  tcp_arm_open_timer        # [conn+0x114]=6000 (lit @0x318cc4); armed in opening/teardown states 2/4, disarmed on ESTABLISHED(8); NOT the sustained-xfer wedge
+0x00318130  tcp_timer_sched_teardown  # timer slot register / teardown helper (r1=type; 5 arm, 7 teardown); zeros [conn+0x118]/0x136
