@@ -176,7 +176,33 @@ Timer arm/cancel goes through `tcp_timer_sched` @0x318130 (r1: 5=arm, 7=cancel);
 `tcp_ack_process` only calls it (type 7) on its RST paths (0x31889c), not on a
 normal in-window ACK — consistent with normal ACKs NOT cancelling `[conn+0x114]`.
 
-## Open: what the vendor's establishment does that ours doesn't
+## RESOLVED (2026-10-12): the re-arm trigger is a HUB RETRANSMIT
+
+Matched captures settle it. `[conn+0x114]` runs its full 6000 ticks (~69 s) to
+RST unless the hub's **retransmit path** fires (one of the only three things,
+with handshake and keepalive probe, that touch the RTO/retransmit machinery —
+`tcp_rtt_arm` has no data-path caller). The hub retransmits its sent data (e.g. a
+23-byte CSW) only when that data stays **unACKed longer than its RTO (~140 ms)**.
+
+- **Vendor** (`Packet_Dumps/3-minute_idle_flash_drive.pcapng`, idle 192 s; and the
+  1 GB capture, 447 s): the Windows client uses **delayed-ACK ~140 ms**, which
+  exceeds the hub RTO, so on *every* ~1 Hz TUR poll the hub resends the CSW
+  before the ACK arrives (visible: duplicate `seq 2962069:2962092`, then a
+  delayed ACK with SACK). Each retransmit refreshes the timer → lives
+  indefinitely.
+- **Us** (`scratchpad/ours_tur.pcap`, our 1 Hz TUR, wedge 70.4 s): macOS Python
+  (and Windows Python) **ACK the CSW instantly** (same-millisecond pure ACK, zero
+  retransmits in the whole capture) → the hub never retransmits → 6000 ticks
+  complete → RST.
+
+So the wedge is not establishment/options/shape/UDP/SCSI at all — it is purely
+the **client TCP stack's ACK latency vs the hub RTO**. The vendor keeps the
+connection alive by accident of Windows' delayed-ACK being slower than the hub's
+retransmit timeout. Remaining firmware detail (nice-to-have, not needed for the
+explanation): the exact instruction in the retransmit path that re-arms
+`[conn+0x114]` / resets the retry counter `[conn+0xfa]` on the retransmit's ACK.
+
+## (Historical) Open: what the vendor's establishment does that ours doesn't
 
 Live evidence says the difference is at connection setup, not traffic shape, and
 not TCP options (Win7-Python plain SYN wedges). Candidates still to pin by RE:
