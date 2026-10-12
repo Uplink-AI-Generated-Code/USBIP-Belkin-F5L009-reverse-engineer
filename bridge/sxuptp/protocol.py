@@ -57,6 +57,28 @@ def pack_jcp(name: str, body: bytes = b"", command: int = JCP_CMD, sub: int = 0)
     return struct.pack(">HH", command, sub) + name.encode("latin1") + b"\x00" + body
 
 
+def pack_device_list_query() -> bytes:
+    """Build the GET USB_DEVICE_LIST request that reliably returns the FULL,
+    parseable device list — byte-identical to the real Belkin driver.
+
+    The list is a generation/delta protocol. A bare `pack_jcp(JCP_USB_DEVICE_LIST,
+    command=1)` (header + name only) returns the full list ONLY while the hub's
+    list generation is still 0 (right after a reboot); once the generation
+    advances (e.g. to 0x0156 after any device-state change) that bare request gets
+    an 8-byte empty "no change" reply, or a 3072-byte alternate-format dump our
+    parser can't read — which previously looked like the hub being "corrupted".
+
+    The vendor request carries a trailing `[generation:2=0x0000][flag:2=0x0200]`
+    full-dump selector and a fixed first field (1), padded to 88 bytes. With
+    generation 0x0000 + flag 0x0200 the hub always returns the compact 350-byte
+    list parse_device_list() understands (verified 6/6 vs an advanced generation).
+    """
+    name = JCP_USB_DEVICE_LIST.encode("latin1") + b"\x00"
+    trailer = struct.pack(">HH", 0x0000, 0x0200)        # generation 0, full-dump flag
+    body = b"\x00" * (88 - 4 - len(name) - len(trailer)) + trailer
+    return struct.pack(">HH", 1, 1) + name + body
+
+
 def parse_device_list(buf: bytes) -> list[dict]:
     """
     Parse a `GET USB_DEVICE_LIST` reply (cmd=1). CONFIRMED live: 8-byte header

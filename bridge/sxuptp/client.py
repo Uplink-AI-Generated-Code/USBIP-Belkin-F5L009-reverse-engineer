@@ -71,8 +71,16 @@ class SxuptpClient:
         """GET USB_DEVICE_LIST (cmd=1) -> [{port, device}]. CONFIRMED live.
 
         `src` binds the source IP (use a non-gateway alias for consistency with
-        attach). Retries once because the hub occasionally drops the first reply
-        right after a discovery round.
+        attach). Retries because the delta protocol can return an empty "no
+        change" reply before the full dump settles.
+
+        Uses pack_device_list_query() — the vendor-exact request with the
+        `[generation 0][flag 0x0200]` full-dump selector. A bare request without
+        that selector only returns the full list while the hub's list generation
+        is 0 (right after a reboot); once it advances you get an empty 8-byte
+        reply or an unparseable 3072-byte alternate dump. That omission — not any
+        hub fault — is what made the list look empty/"corrupted" after device
+        churn.
 
         IMPORTANT: bind an EPHEMERAL source port (src, 0), like the vendor driver
         / pybelkusb. Binding the well-known port 19540 here poisons a subsequent
@@ -87,7 +95,7 @@ class SxuptpClient:
                 pass
             s.settimeout(timeout)
             try:
-                s.sendto(p.pack_jcp(p.JCP_USB_DEVICE_LIST, command=1), (host, port))
+                s.sendto(p.pack_device_list_query(), (host, port))
                 try:
                     data, _ = s.recvfrom(8192)
                     devs = p.parse_device_list(data)

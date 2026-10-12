@@ -94,7 +94,7 @@ class Hub:
         """GET USB_DEVICE_LIST on the shared session socket (same source port the
         CONNECTs use)."""
         from ..sxuptp import protocol as sx
-        req = b"\x00\x01\x00\x01GET USB_DEVICE_LIST" + b"\0" * 0x4F + b"\x02\x00"
+        req = sx.pack_device_list_query()        # vendor-exact full-dump request
         for _ in range(max(1, retries)):
             try:
                 self._session.send(req)
