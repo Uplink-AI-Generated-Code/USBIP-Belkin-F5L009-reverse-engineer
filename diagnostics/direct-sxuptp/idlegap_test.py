@@ -6,8 +6,8 @@ idle gap resets it, the wedge (if any) moves to ~68s AFTER the gap, not ~68s
 after connect; if the connection instead sails to completion, idle resets it.
 Single TCP connection (direct path never reconnects).
 """
-import sys, time, argparse
-sys.path.insert(0, "/Users/radu/Code/Claude/Belkin_F5L009_USB_IP_Hub/diagnostics/direct-sxuptp")
+import os, sys, time, argparse
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # portable: this script's dir
 import sxuptp_direct as sx
 
 

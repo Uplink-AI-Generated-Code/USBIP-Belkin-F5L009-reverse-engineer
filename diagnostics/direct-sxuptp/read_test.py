@@ -8,8 +8,8 @@ RTO/keepalive timer. The vendor driver's real file copy interleaves reads
 Sustained write to the unformatted 2nd GPT partition, one TCP connection (direct
 path never reconnects), with a READ(10) every `rd` writes. Reports crossing 70s.
 """
-import sys, time, argparse
-sys.path.insert(0, "/Users/radu/Code/Claude/Belkin_F5L009_USB_IP_Hub/diagnostics/direct-sxuptp")
+import os, sys, time, argparse
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # portable: this script's dir
 import sxuptp_direct as sx
 
 

@@ -5,8 +5,8 @@ shows the driver polling TUR once/second during idle stretches, and that
 connection lives 447s. (shape_test's TUR was malformed -- cdblen=1 -- so it
 never counted.) Single TCP connection (direct path never reconnects).
 """
-import sys, time, argparse
-sys.path.insert(0, "/Users/radu/Code/Claude/Belkin_F5L009_USB_IP_Hub/diagnostics/direct-sxuptp")
+import os, sys, time, argparse
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # portable: this script's dir
 import sxuptp_direct as sx
 
 

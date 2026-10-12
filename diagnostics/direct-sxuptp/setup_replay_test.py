@@ -6,9 +6,9 @@ BEFORE sustained bulk, to test whether some setup command disarms the hub's
   MODE SENSE(6) x3, MODE SELECT(6) [data-out], READ CAPACITY.
 Single TCP connection (direct path never reconnects).
 """
-import sys, time, struct, argparse
-sys.path.insert(0, "/Users/radu/Code/Claude/Belkin_F5L009_USB_IP_Hub/diagnostics/direct-sxuptp")
-import sxuptp_direct as sx
+import os, sys, time, struct, argparse
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # portable: this script's dir
+import sxuptp_direct as sx   # adds the repo root to sys.path for `import bridge...`
 
 MS_DATA = bytes.fromhex("0000000800000000000002000812040000000000000000000000000000000000")
 
@@ -60,11 +60,14 @@ def main():
     ap.add_argument("--mb", type=int, default=170)
     ap.add_argument("--wb", type=int, default=128)
     ap.add_argument("--no-setup", action="store_true")
+    ap.add_argument("--part-start", type=int, default=None,
+                    help="LBA to write from (default = unformatted part[1]; "
+                         "2048 = the exFAT part[0], DESTRUCTIVE)")
     args = ap.parse_args()
 
     salt = int(time.time()) & 0xffffffff
     hub, dev = sx.attach(args.host, args.client_ip, "1-1", 10.0)
-    start = sx.gpt_partitions(dev)[1][1]
+    start = args.part_start if args.part_start is not None else sx.gpt_partitions(dev)[1][1]
     if not args.no_setup:
         print("replaying vendor SCSI setup sequence:")
         run_setup(dev)

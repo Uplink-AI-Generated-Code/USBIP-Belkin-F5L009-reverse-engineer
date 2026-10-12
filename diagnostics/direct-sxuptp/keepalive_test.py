@@ -11,10 +11,9 @@ clean hub, back to back:
 Single TCP connection each (the direct path never reconnects), so crossing 70s
 can only mean the timer was re-armed.
 """
-import sys, time, socket, threading, argparse
-sys.path.insert(0, "/Users/radu/Code/Claude/Belkin_F5L009_USB_IP_Hub/diagnostics/direct-sxuptp")
-sys.path.insert(0, "/Users/radu/Code/Claude/Belkin_F5L009_USB_IP_Hub")
-import sxuptp_direct as sx
+import os, sys, time, socket, threading, argparse
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # portable: this script's dir
+import sxuptp_direct as sx   # adds the repo root to sys.path for `import bridge...`
 from bridge.sxuptp import protocol as p
 
 
