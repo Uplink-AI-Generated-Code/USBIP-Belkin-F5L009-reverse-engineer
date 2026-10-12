@@ -327,20 +327,33 @@ class SxuptpClient:
             # inter-chunk pace keeps the cache from filling in the first place.
             deadline = time.monotonic() + self._bulk_retry_window
             pause = self._bulk_recover
+            backpressure = False
             while True:
                 self.seq = (self.seq + 1) & 0xFFFF
+                t0 = time.monotonic()
                 self.tcp.sendall(p.bulk_write(self.dev_id, ep_addr, chunk, seq=self.seq))
                 self.tcp.settimeout(self.timeout)
                 status, _ = self._recv_reply()
+                lat = time.monotonic() - t0          # how long the hub took to ACK
                 if status == p.STATUS_OK:
                     break
+                backpressure = True
+                if self._bulk_stats:
+                    self._stats(lat, pause, True, len(chunk),
+                                event=f"resend status={status:#06x}")
                 if time.monotonic() > deadline:
+                    if self._bulk_stats:
+                        self._stats(lat, pause, True, 0, event=f"GIVEUP status={status:#06x}")
                     return status
                 time.sleep(pause)
                 pause = min(pause * 1.5, 1.0)
             off += len(chunk)
-            if self._bulk_pace:
-                time.sleep(self._bulk_pace)
+            # Pacing: adaptive (device-driven) when enabled, else the fixed pace.
+            delay = self._adapt_step(lat, backpressure) if self._bulk_adapt else self._bulk_pace
+            if self._bulk_stats:
+                self._stats(lat, delay, backpressure, len(chunk))
+            if delay:
+                time.sleep(delay)
         return p.STATUS_OK
 
     # Per-request cap for bulk IN. Must be 512-aligned: one SXUPTP bulk_read maps
@@ -362,6 +375,81 @@ class SxuptpClient:
     # wedged slot only prolongs it, so we fail the I/O promptly instead.
     _bulk_recover = float(os.environ.get("SXBULK_RECOVER", "0.05") or 0)
     _bulk_retry_window = float(os.environ.get("SXBULK_RETRY_WINDOW", "1.5") or 0)
+
+    # --- reactive (adaptive) pacing [PROTOTYPE] -------------------------------
+    # Instead of a fixed inter-chunk pace, derive the write rate from the hub's
+    # own back-pressure: time how long each 64 KB chunk's ACK takes and run AIMD
+    # on the inter-chunk delay -- shrink it while ACKs stay fast and status is OK,
+    # grow it the instant an ACK slows or the device reports busy. The device sets
+    # the pace, not a synthetic constant. Opt in with SXBULK_ADAPT=1 (then
+    # SXBULK_PACE is ignored for multi-chunk transfers).
+    _bulk_adapt = bool(os.environ.get("SXBULK_ADAPT"))
+    # SXBULK_STATS=1 prints the per-window latency/pace trend to stderr -- the
+    # instrumentation that answers "does ACK latency rise before the -32 drop, or
+    # does the device drop cold?" (works with fixed OR adaptive pacing).
+    _bulk_stats = bool(os.environ.get("SXBULK_STATS"))
+    _ADAPT_FLOOR = 0.0      # min inter-chunk delay (s) while the hub keeps up
+    _ADAPT_CAP = 0.25       # max delay (s) under sustained back-pressure
+    _ADAPT_AI = 0.001       # additive decrease per healthy chunk (speed back up)
+    _ADAPT_MD = 2.0         # multiplicative increase on back-pressure (slow down)
+    _ADAPT_BUMP = 0.010     # delay floor the first back-pressure jumps to
+    _ADAPT_SPIKE = 4.0      # ACK latency > this x EWMA baseline => back-pressure
+    _ADAPT_ABS = 0.012      # ...or ACK latency over this many seconds (absolute)
+    _STATS_WINDOW = int(os.environ.get("SXBULK_STATS_WINDOW", "64") or 64)  # chunks/line (~4 MB)
+
+    def _adapt_step(self, lat: float, backpressure: bool) -> float:
+        """Update the adaptive inter-chunk delay from one chunk's ACK latency and
+        whether it needed a resend; return the delay to sleep. AIMD on the delay:
+        additive-decrease while healthy, multiplicative-increase under stress."""
+        if not hasattr(self, "_adapt_pace"):
+            self._adapt_pace = self._bulk_pace or 0.0
+            self._lat_ewma = lat
+        ewma = self._lat_ewma
+        # Either signal means back off: an absolute slow ACK (always suspicious on
+        # this hub, where a healthy ACK is ~1 ms), or a relative spike over the
+        # running baseline (catches a gradual climb before it crosses the absolute
+        # line). Only update the baseline from NON-stressed samples, so a sustained
+        # stall can't creep into the baseline and silence the detector.
+        stressed = (backpressure or lat > self._ADAPT_ABS
+                    or lat > ewma * self._ADAPT_SPIKE)
+        if not stressed:
+            self._lat_ewma = 0.85 * ewma + 0.15 * lat
+        if stressed:
+            self._adapt_pace = min(max(self._adapt_pace * self._ADAPT_MD,
+                                       self._ADAPT_BUMP), self._ADAPT_CAP)
+        else:
+            self._adapt_pace = max(self._adapt_pace - self._ADAPT_AI, self._ADAPT_FLOOR)
+        return self._adapt_pace
+
+    def _stats(self, lat: float, delay: float, backpressure: bool, n: int,
+               event: str = "") -> None:
+        """Accumulate per-chunk write stats and emit a line every _STATS_WINDOW
+        chunks (plus immediately on any back-pressure/anomaly), to stderr. Cumulative
+        counters (bytes, total back-pressure) never reset; window counters (count,
+        latency sum/max) reset on each emitted line."""
+        import os as _os
+        if not hasattr(self, "_st_t0"):
+            self._st_t0 = time.monotonic()
+            self._st_bytes = self._st_bp = 0           # cumulative
+            self._st_wn = self._st_wsum = self._st_wmax = 0.0   # per window
+        if event:                                      # anomaly line only; no accounting
+            _os.write(2, (f"[wstat] t={time.monotonic()-self._st_t0:6.1f}s "
+                          f"MB={self._st_bytes/1e6:6.1f} !! {event} "
+                          f"(lat_ms={lat*1000:.2f})\n").encode())
+            return
+        self._st_bytes += n
+        if backpressure:
+            self._st_bp += 1
+        self._st_wn += 1
+        self._st_wsum += lat
+        self._st_wmax = max(self._st_wmax, lat)
+        if backpressure or self._st_wn >= self._STATS_WINDOW:
+            avg = self._st_wsum / self._st_wn
+            _os.write(2, (f"[wstat] t={time.monotonic()-self._st_t0:6.1f}s "
+                          f"MB={self._st_bytes/1e6:6.1f} "
+                          f"lat_ms avg={avg*1000:6.2f} max={self._st_wmax*1000:7.2f} "
+                          f"pace_ms={delay*1000:6.2f} bp_total={self._st_bp}\n").encode())
+            self._st_wn = self._st_wsum = self._st_wmax = 0.0
 
     def bulk_in(self, ep_addr: int, length: int) -> tuple[int, bytes]:
         """Bulk/interrupt IN transfer -> (status, data). ep_addr has bit7=1 (IN).
@@ -578,6 +666,21 @@ class ChannelMux:
         self.c.tcp.sendall(p.interrupt_read(self.c.dev_id, ep, length, interval, seq=seq))
         self._primed.add(ep)
 
+    def _reprime_later(self, ep: int) -> None:
+        """Re-issue the interrupt poll for `ep` after its bInterval, off the reader
+        thread, so an idle or hub-errored poll does not busy-loop. At most one
+        re-poll is scheduled per ep (the read is single-outstanding)."""
+        if not self._alive:
+            return
+        interval = self._ep_cfg.get(ep, (8, 10))[1] or 10
+        delay = min(max(interval, 4), 20) / 1000.0        # bInterval ms -> seconds, clamped
+        def fire():
+            with self._lock:
+                if not self._alive or self._err or ep in self._primed:
+                    return
+                self._prime(ep)
+        threading.Timer(delay, fire).start()
+
     def enqueue(self, ep: int, urb, complete) -> None:
         """Register a kernel interrupt-IN URB. `complete(urb, status, data)` is
         called (possibly on the reader thread) when a report for `ep` arrives; if
@@ -691,15 +794,28 @@ class ChannelMux:
                 done = None
                 with self._lock:
                     ep = self._seq_ep.pop(seq, None)
-                    if ep is not None:                  # interrupt report
+                    if ep is not None:                  # interrupt poll reply
                         self._primed.discard(ep)
-                        pend = self._pending[ep]
-                        if pend:
-                            urb, complete = pend.popleft()
-                            done = (complete, urb, status, data)
+                        if status == p.STATUS_OK and data:   # a real HID report
+                            pend = self._pending[ep]
+                            if pend:
+                                urb, complete = pend.popleft()
+                                done = (complete, urb, status, data)
+                            else:
+                                self._reports[ep].append((status, data))
+                            self._prime(ep)             # keep one outstanding
                         else:
-                            self._reports[ep].append((status, data))
-                        self._prime(ep)                 # keep one outstanding
+                            # No usable report: either an empty reply (endpoint idle)
+                            # or a non-OK status -- under multi-device load the hub
+                            # stops holding the interrupt read and kicks it back with
+                            # an error (often still carrying stale bytes). Do NOT
+                            # complete the URB: the kernel resubmits with no backoff,
+                            # and a hub that keeps erroring these turns it into a
+                            # ~1 kHz storm that saturates the hub and wedges the other
+                            # devices. Keep the URB parked and re-poll at the
+                            # endpoint's interval; the next real report still arrives
+                            # promptly.
+                            self._reprime_later(ep)
                     elif seq in self._bulk_pending:     # bulk-IN reply
                         urb, complete, bep = self._bulk_pending.pop(seq)
                         if len(data) <= self._BULK_EMPTY:  # no real payload -> pace
