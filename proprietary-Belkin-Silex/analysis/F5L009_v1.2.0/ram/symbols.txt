@@ -93,20 +93,49 @@
 # items ("You must login as an administrator." @0x383eb0, check @0x32f65a).
 
 # --- TCP stack (data channel, port 19540) ----------------------------------
-# See tcp_connection_and_keepalive.md. Conn state byte at conn+0xd6; FSM jump
-# table @0x37f98c (index = state-4). CORRECTED 2026-10-12 by live ablation: the
-# ~69s sustained-transfer RST is NOT driven by traffic shape (RTT starvation) --
-# pure idle 1Hz TUR wedges at 69.8s and the vendor's 345s of continuous bulk
-# survives. It is a FIXED timer armed at establishment; the RST is emitted at
-# 0x3193dc when the [conn+0x114] retransmit timer exhausts its retries.
-0x00319558  tcp_input                 # TCP segment state machine; parse hdr, dispatch on [conn+0xd6]
-0x003159ec  tcp_set_state             # set conn state byte [conn+0xd6] (states 8/9 special)
-0x00316458  tcp_send_segment          # send a segment; arg r2 = TCP flags (0x02 SYN,0x04 RST,0x10 ACK,0x12 SYN-ACK)
+# See tcp_connection_and_keepalive.md. Conn state byte at conn+0xd6; two adjacent
+# jump tables: in-tick retransmit-fire sub-table @0x37f954 (index = state), and
+# tcp_input FSM table @0x37f98c (index = state-4).
+#
+# RETRACED 2026-10-13 (full fresh trace of the state machine). The earlier claim
+# that the ~69s RST is a TCP-layer timer ([conn+0x114] "6000-tick" countdown) is
+# REFUTED by the code itself:
+#  * The literal 6000 (0x1770) is loaded at exactly ONE site in the whole image
+#    (0x318ca8, tcp_arm_open_timer) and is written ONLY to [conn+0x114] as the
+#    OPEN/SYN_RCVD watchdog. It is disarmed (=0) at the 7->8 handshake completion
+#    (0x319790->0x3197a6), which any clean client ACK of the SYN-ACK reaches
+#    (gated: ACK flag set AND [sp+0x2c]!=0 i.e. acks ISS+1). Ours does -> disarmed.
+#  * In ESTABLISHED [conn+0x114] is ONLY the retransmit countdown (RTO-scale, not
+#    6000). When it expires on an established conn with nothing outstanding
+#    (snd.nxt==snd.una) and an open window, the in-tick handler 0x319214 ->
+#    0x319222 -> 0x3194b8 just CLEARS [conn+0x114]/[conn+0xfa] and stops. No
+#    retransmit, NO RST. So on an idle/fully-acked connection 0x114 self-cancels
+#    and cannot cause the wedge. The 0x3193dc RST needs real outstanding data and
+#    repeated retransmits -- our zero-retransmit idle captures don't take it.
+#  * The other per-tick countdowns also do NOT autonomously RST an idle ESTAB
+#    conn: [conn+0x124] keepalive -> probe is a no-op if nothing unacked and never
+#    re-arms itself; [conn+0x100] -> job-signal/re-arm (0x31945c/0x319420), no RST;
+#    [conn+0x136] -> RST @0x319368 but is NEVER armed nonzero (only cleared in
+#    tcp_timer_sched @0x318178) so that path is dead.
+# => No TCP per-tick timer fires an autonomous ~69s RST on an established conn.
+#    The wedge must be driven from ABOVE (SXUPTP job watchdog tearing the socket
+#    via sxuptp_conn_close 0x302a44) or by an incoming-segment path. Next: trace
+#    the SXUPTP job FSM lease/idle timeout (job[4], [conn+0xe4], [conn+0x16] via
+#    0x3159d0 job-event post, sxuptp_conn_state_machine @0x302fb0).
+0x00319558  tcp_input                 # TCP segment state machine; parse hdr, dispatch on [conn+0xd6] via @0x37f98c (index state-4)
+0x003159ec  tcp_set_state             # set conn state [conn+0xd6], save prev in [conn+0xd7]; inc/dec an "established" global on entering/leaving states {8,9}
+0x003159d0  tcp_signal_job_event      # set [conn+0x16]=r1 (job-event state); if [conn+0x128] bit15 set, notify via 0x334b6c(conn+0x18). Bridge TCP->SXUPTP job FSM
+0x00316458  tcp_send_segment          # send a segment; arg r2 = TCP flags (0x02 SYN,0x04 RST,0x10 ACK,0x11 FIN-ACK,0x12 SYN-ACK,0x18 PSH-ACK)
 0x0031642c  tcp_rtt_arm               # arm RTT timing: [conn+0xf9]=1, t_rtseq[conn+0x104]=snd.una[conn+0x90], t_start[conn+0x108]=now. ONLY 3 callers: 0x3176f0 (SYN), 0x319f08 (SYN-ACK), 0x31691e (keepalive probe) -- NOT the data-send path, so data never refreshes the RTO
 0x00317820  tcp_rto_update            # RTT->RTO estimator; writes RTO/backoff [conn+0x118], clamp runtime min/max
-0x00318204  tcp_ack_process           # process ACK; RTT measure site @0x3187ce (gated t_rtt_active & recv_ack>=t_rtseq)
-0x003190ec  tcp_keepalive_tick        # per-conn tick: dec countdowns [conn+0x124](keepalive,ESTAB only ->probe @0x31693c), [conn+0x100], [conn+0x114](retransmit); retransmit doubles RTO [conn+0x118]@0x3191cc; retries>[conn+0xfb] -> RST @0x3193dc
-0x0031693c  tcp_send_keepalive_probe  # [conn+0x124] expiry: send probe if unacked data ([conn+0x90] snd.una vs [conn+0x98]); sets flag 0x4000 in [conn+0x128], tcp_send_segment(r2=0x18)
-0x003193dc  tcp_drop_rst              # retransmit-exhausted teardown: log, [conn+0x98]->[conn+0x94], tcp_send_segment(r2=4)=RST, set_state(1), 0x337598, teardown 0x318130(,7)
-0x00318c98  tcp_arm_open_timer        # [conn+0x114]=6000 (lit @0x318cc4) ~= 69s at the tick rate = the wedge period. Doc says disarmed at 7->8 (0x3197a6, gated recv_ack==snd.una+1); our wedge ACKs ISS+1 yet still dies at ~69s, so either the disarm does not land or 0x114 is re-armed to 6000 in ESTABLISHED and normal ACKs do not cancel it (ack_process only calls timer-cancel type7 on its RST paths). 0x114 also serves as the ESTABLISHED retransmit countdown.
-0x00318130  tcp_timer_sched_teardown  # timer-wheel arm/cancel (r1=type; 5 arm, 7 teardown) via 0x339fa0; manages [conn+0x14] slot and flags [conn+0x126]/0x134/0x136
+0x00318204  tcp_ack_process           # process ACK. Normal (ack<=snd.nxt) -> 0x318974; when snd.una==snd.nxt (all acked) -> 0x3187a6 RTO-reset gate (t_rtt_active[0xf9] & [sp+0x3c] & ack>=t_rtseq[0x104] -> 0x317820). Does NOT arm/cancel [conn+0x114] on a normal in-window ACK
+0x00319790  tcp_handshake_complete    # 7->8: bl 0x317820 (RTO reset), snd.una[0x90]+=1, [conn+0x114]=0 (DISARM open timer @0x3197a6), [conn+0xfa]=0, [conn+0xfb]=retry-limit, [0x94]=[0x98]=snd.una, [0x9c]=window, [0xdc]=ack, set_state(8), 0x317a44 (job establish hook)
+0x00317a44  tcp_job_establish_hook    # SXUPTP job-layer establish: touches parent [conn+0xec], [conn+0xea] refcount, [conn+0x14] job-state halfword; re-arms a job timer via 0x339fa0
+0x003190ec  tcp_keepalive_tick        # per-conn tick (states>3). Decrements: [conn+0x124](keepalive-idle, ESTAB 8/9 only -> probe @0x31693c, no re-arm), [conn+0x100](every tick -> 0x31945c job-signal / 0x319420 re-arm / fall-through), [conn+0x114](retransmit; on 0 dispatch via @0x37f954), [conn+0x136](every tick -> RST @0x319368, but never armed nonzero). [conn+0x9b*2=0x136]
+0x00319214  tcp_tick_retransmit_estab # in-tick sub-handler for states 8/9: if snd.nxt!=snd.una -> 0x319504 retransmit; else (idle) window!=0 -> 0x3194b8 self-cancel (no RST), window==0 -> persist
+0x003194b8  tcp_tick_retransmit_stop  # clear [conn+0xfa]=0 and [conn+0x114]=0, stop (idle established retransmit expiry -- the reason 0x114 can't kill an idle conn)
+0x0031693c  tcp_send_keepalive_probe  # [conn+0x124] expiry: send probe ONLY if unacked data ([conn+0x90] snd.una vs [conn+0x98]); else no-op. sets flag 0x4000 in [conn+0x128], tcp_send_segment(r2=0x18)
+0x003193dc  tcp_drop_rst_retx         # retransmit-exhausted teardown (needs real outstanding data + [conn+0xfa]>=[conn+0xfb]): log, [0x98]->[0x94], tcp_send_segment(r2=4)=RST, set_state(1), 0x337598, teardown 0x318130(,7)
+0x00319368  tcp_drop_rst_timer136     # RST on [conn+0x136] expiry: log, tcp_send_segment(r2=4)=RST, set_state(1), teardown 0x318130(,7). DEAD PATH: [conn+0x136] is never armed nonzero
+0x00318c98  tcp_arm_open_timer        # OPEN/SYN_RCVD watchdog: [conn+0xfa]=0, [conn+0x114]=6000 (lit @0x318cc4), set_state(arg), arm timer type5. Only 6000-arm in the image; disarmed at 7->8
+0x00318130  tcp_timer_sched           # timer-wheel arm/cancel (r1=type; 5 arm, 7 teardown) via 0x339fa0/0x3159d0; on cleanup clears [conn+0x14], [conn+0x134]=3, [conn+0x136]=0

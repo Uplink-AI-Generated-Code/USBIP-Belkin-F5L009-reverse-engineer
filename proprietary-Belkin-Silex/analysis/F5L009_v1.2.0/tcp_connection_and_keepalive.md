@@ -11,7 +11,65 @@ below the SXUPTPD *job* state machine already noted in
 (`sxuptp_conn_state_machine` @0x302fb0, job state at `job[4]`). The two layers are
 distinct: the SXUPTPD job FSM wraps this TCP connection FSM.
 
-## TL;DR (the wedge) — CORRECTED 2026-10-12 after live ablation
+## RETRACED 2026-10-13 — the wedge is NOT a TCP-layer timer
+
+> A full fresh trace of the state machine (tcp_set_state, tcp_arm_open_timer, the
+> 7→8 handshake, all four per-tick countdowns and their expiry handlers, both jump
+> tables) **refutes the `[conn+0x114]` "6000-tick" story that every prior version
+> of this doc assumed.** No TCP per-tick timer fires an autonomous ~69 s RST on an
+> established connection. The killer is above TCP (SXUPTP job watchdog) or on an
+> incoming-segment path — not here.
+
+What the code actually does (all verified this pass, addresses below):
+
+1. **`6000` is loaded at exactly ONE site in the whole image** — `0x318ca8`
+   inside `tcp_arm_open_timer`, written only to `[conn+0x114]` as the
+   **OPEN / SYN_RCVD watchdog** (6000 ticks). (Image-wide scan for the literal
+   `0x1770`: one hit.)
+2. **It is disarmed at the 7→8 handshake completion.** The state-7 handler
+   `0x319938` branches to `0x319790` when the segment has **ACK set AND
+   `[sp+0x2c]≠0`** (the ACK acknowledges the SYN-ACK, i.e. acks ISS+1). There
+   `0x3197a6` sets `[conn+0x114]=0`, clears retry `[conn+0xfa]`, loads the retry
+   limit into `[conn+0xfb]`, calls the RTO estimator `0x317820`, and
+   `set_state(8)`. **Any clean client handshake reaches this — ours does.** So
+   `[conn+0x114]` is 0 entering ESTABLISHED; the "69 s = 6000 ticks of 0x114"
+   arithmetic never applies in ESTABLISHED.
+3. **In ESTABLISHED `[conn+0x114]` is only the retransmit countdown (RTO-scale).**
+   When it expires, the in-tick sub-table `@0x37f954` dispatches state 8/9 to
+   `0x319214`: if `snd.nxt != snd.una` → `0x319504` (retransmit), **else (nothing
+   outstanding) with an open window → `0x3194b8` which just CLEARS
+   `[conn+0x114]`/`[conn+0xfa]` and stops — no retransmit, no RST.** So on an
+   idle/fully-acked connection the retransmit timer *self-cancels*. The only RST
+   from here (`0x3193dc`) needs real outstanding data and `[conn+0xfa] ≥
+   [conn+0xfb]` retransmits — which our **zero-retransmit** idle captures never
+   produce.
+4. **The other per-tick countdowns don't RST an idle ESTABLISHED conn either:**
+   - `[conn+0x124]` (keepalive-idle, decremented only in states 8/9): on 0 →
+     `tcp_send_keepalive_probe 0x31693c`, which **sends nothing if there is no
+     unacked data** and **does not re-arm `[conn+0x124]`** → one-shot no-op.
+   - `[conn+0x100]` (decremented every tick): on 0 → `0x31945c` (zero `[conn+0x14]`,
+     post job-event `0x3159d0(conn,6)`) or `0x319420` (re-arm via `0x339fa0`) or
+     fall through — no RST.
+   - `[conn+0x136]` (decremented every tick): on 0 → **RST at `0x319368`** — but
+     `[conn+0x136]` is **never armed to a nonzero value** anywhere in the image
+     (only *cleared*, at `0x318178` in `tcp_timer_sched`), so this path is dead.
+
+**Conclusion:** the ~68–70 s wedge is not emitted by `tcp_keepalive_tick`. Since
+it reproduces on a genuinely idle, zero-retransmit connection, the RST is driven
+from **above TCP** — most likely the SXUPTP job FSM hitting a lease/inactivity
+timeout and calling `sxuptp_conn_close` (`0x302a44`) to tear the socket (which
+does `set_state(1)` + RST) — or an incoming-segment validation path in
+`tcp_input`. **Next step: trace the SXUPTP job watchdog** (job state `job[4]` /
+`sxuptp_conn_state_machine 0x302fb0`, the conn-side idle field `[conn+0xe4]`, the
+job-event state `[conn+0x16]` posted by `0x3159d0`, and the establish hook
+`0x317a44`), and enumerate every `sxuptp_conn_close` / `tcp_send_segment(r2=4)`
+caller reachable without a prior retransmit.
+
+This supersedes the "Status (2026-10-12)" and TL;DR sections below (kept for the
+timer-field RE, which is still accurate — only the *attribution of the RST* was
+wrong).
+
+## TL;DR (the wedge) — CORRECTED 2026-10-12 after live ablation (SUPERSEDED by the 2026-10-13 retrace above)
 
 > **The earlier "RTT-samples / paced-bidirectional-shape" model below (struck
 > through) was REFUTED by live tests on the healthy hub. The wedge is a FIXED
