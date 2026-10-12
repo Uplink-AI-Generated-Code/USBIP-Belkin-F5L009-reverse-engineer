@@ -15,6 +15,14 @@
    device was NOT actually held by another host, so no contention/steal protocol
    was exercised (the request just attached normally; no distinct packets seen).
    Needs a real scenario: device reserved by host A, then host B requests it.
+3. **exFAT-path early wedge (~160 KB)** — STILL OPEN, separate from the ~68s
+   connection RST. A full-bridge write to the exFAT partition drops very early
+   (~160 KB), long before the ~68s keepalive wall and not fixed by reconnect.
+   Raw/large-sequential writes to the unformatted partition are fine (128MB via
+   the bridge, 256MB direct, both past 68s with reconnect). The exFAT drop is on
+   the metadata / scattered-small-write path. NOT being worked yet — investigate
+   later (candidate: small-transfer cadence or FS-metadata interleave triggering
+   an early hub-side drop distinct from the keepalive timer).
 
 ## Bridge follow-ups (lower priority)
 - Consumer/media keys (ep0x82): DONE and routed correctly. The hub delivers ep82
