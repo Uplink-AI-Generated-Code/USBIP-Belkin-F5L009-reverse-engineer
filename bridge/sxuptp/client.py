@@ -25,6 +25,10 @@ class SxuptpClient:
         self.port = port
         self.timeout = timeout
         self.tcp: socket.socket | None = None
+        # endpoint addr -> wMaxPacketSize, populated by the backend after
+        # enumeration so bulk headers carry the real MPS (0x8000|mps). Falls back
+        # to 512 (correct high-speed bulk) for any endpoint not listed.
+        self.ep_mps: dict[int, int] = {}
 
     # --- discovery (UDP 19540) ------------------------------------------
     @staticmethod
@@ -381,9 +385,10 @@ class SxuptpClient:
         cap bulk_in uses, and send them back-to-back as one USB OUT stream."""
         if self.tcp is None or self.dev_id is None:
             raise RuntimeError("not attached")
+        mps = self.ep_mps.get(ep_addr, 512)
         if not data:
             self.seq = (self.seq + 1) & 0xFFFF
-            self.tcp.sendall(p.bulk_write(self.dev_id, ep_addr, data, seq=self.seq))
+            self.tcp.sendall(p.bulk_write(self.dev_id, ep_addr, data, seq=self.seq, mps=mps))
             self.tcp.settimeout(self.timeout)
             status, _ = self._recv_reply()
             return status
@@ -401,7 +406,7 @@ class SxuptpClient:
             while True:
                 self.seq = (self.seq + 1) & 0xFFFF
                 t0 = time.monotonic()
-                self.tcp.sendall(p.bulk_write(self.dev_id, ep_addr, chunk, seq=self.seq))
+                self.tcp.sendall(p.bulk_write(self.dev_id, ep_addr, chunk, seq=self.seq, mps=mps))
                 self.tcp.settimeout(self.timeout)
                 status, _ = self._recv_reply()
                 lat = time.monotonic() - t0          # how long the hub took to ACK
@@ -538,13 +543,14 @@ class SxuptpClient:
         """
         if self.tcp is None or self.dev_id is None:
             raise RuntimeError("not attached")
+        mps = self.ep_mps.get(ep_addr, 512)
         out = b""
         remaining = length
         deadline = time.monotonic() + max(self.timeout, 5.0)
         while remaining > 0:
             req = min(remaining, self._BULK_CHUNK)
             self.seq = (self.seq + 1) & 0xFFFF
-            self.tcp.sendall(p.bulk_read(self.dev_id, ep_addr, req, seq=self.seq))
+            self.tcp.sendall(p.bulk_read(self.dev_id, ep_addr, req, seq=self.seq, mps=mps))
             self.tcp.settimeout(self.timeout)
             status, data = self._recv_reply()
             if status != p.STATUS_OK:
@@ -798,7 +804,8 @@ class ChannelMux:
                     self.c.seq = (self.c.seq + 1) & 0xFFFF
                     seq = self.c.seq
                     self._bulk_pending[seq] = (urb, complete, ep)
-                    self.c.tcp.sendall(p.bulk_read(self.c.dev_id, ep, length, seq=seq))
+                    self.c.tcp.sendall(p.bulk_read(self.c.dev_id, ep, length, seq=seq,
+                                                   mps=self.c.ep_mps.get(ep, 512)))
                     cb = None
             if cb is not None:
                 cb[1](cb[0], EREMOTEIO_, b"")
@@ -819,7 +826,8 @@ class ChannelMux:
             self.c.seq = (self.c.seq + 1) & 0xFFFF
             seq = self.c.seq
             self._ctrl[seq] = [ev, None]
-            self.c.tcp.sendall(p.bulk_write(self.c.dev_id, ep, data, seq=seq))
+            self.c.tcp.sendall(p.bulk_write(self.c.dev_id, ep, data, seq=seq,
+                                            mps=self.c.ep_mps.get(ep, 512)))
         if not ev.wait(timeout):
             with self._lock:
                 self._ctrl.pop(seq, None)

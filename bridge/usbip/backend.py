@@ -254,6 +254,10 @@ class Device:
                 self.use_mux = bool(async_eps)
                 self.composite = False
             self._async_eps = async_eps
+            # Give the client the enumerated endpoint MaxPacketSizes so its bulk
+            # headers carry the real 0x8000|mps (e.g. 0x8200 for a 512-byte HS
+            # bulk endpoint) instead of the hardcoded 64 the default would use.
+            c.ep_mps = dict(self.ep_mps)
 
         # Derive the USB speed the hub must advertise to the client, so the vhci
         # does not clamp maxpacket (full-speed + 512-byte bulk EPs -> EPIPE loop)
@@ -327,6 +331,7 @@ class Device:
                 self._lock.release()
         sc._owns_udp = True
         sc.dev_id = dev_id                       # reuse; sibling answers no control
+        sc.ep_mps = dict(self.ep_mps)            # carry real MPS on the sibling's bulk headers
         if self.hub is not None:
             self.hub.claim_node(node)            # hide its standalone busid
         smux = ChannelMux(sc)

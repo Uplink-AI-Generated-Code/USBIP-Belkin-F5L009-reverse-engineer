@@ -365,15 +365,24 @@ def control_write(dev_id: int, bm_request_type: int, b_request: int,
     return hdr + payload
 
 
-def bulk_write(dev_id: int, ep_addr: int, payload: bytes, seq: int = 0) -> bytes:
+def bulk_write(dev_id: int, ep_addr: int, payload: bytes, seq: int = 0,
+               mps: int = 512) -> bytes:
     """Bulk/interrupt OUT. `ep_addr` is the full USB endpoint address (bit7=0 for
     OUT). Layout matches pybelkusb's working bulkWrite (18-byte header):
-      type=8003 seq 0003 [devId<<8 | ep_addr] [ep_num 01] 8040 len32 len16
+      type=8003 seq 0003 [devId<<8 | ep_addr] [ep_num 01] <0x8000|mps> len32 len16
+
+    The [10:12] half-word is 0x8000 | wMaxPacketSize. pybelkusb hardcoded it as
+    0x8040 (= MPS 64), but the real Belkin driver sends the endpoint's actual MPS
+    (0x8200 = 512 for a high-speed bulk mass-storage endpoint). We now pass the
+    enumerated MPS, defaulting to 512 (the correct high-speed bulk value) so a
+    caller without descriptor info still matches the vendor rather than lying with
+    64. (Confirmed functionally harmless under sustained transfer — data flows
+    either way — but matching the vendor is the correct value to send.)
     """
     hdr = struct.pack(">HHHHBBHLH",
                       0x8003, seq & 0xFFFF, 0x0003,
                       ((dev_id & 0xFF) << 8) | (ep_addr & 0xFF),
-                      ep_addr & 0x0F, 0x01, 0x8040, 0, len(payload))
+                      ep_addr & 0x0F, 0x01, 0x8000 | (mps & 0x7FFF), 0, len(payload))
     return hdr + payload
 
 
@@ -394,14 +403,17 @@ def interrupt_read(dev_id: int, ep_addr: int, length: int, interval: int = 10,
                        interval & 0xFFFF, 0x0000, length & 0xFFFF)
 
 
-def bulk_read(dev_id: int, ep_addr: int, length: int, seq: int = 0) -> bytes:
+def bulk_read(dev_id: int, ep_addr: int, length: int, seq: int = 0,
+              mps: int = 512) -> bytes:
     """Bulk/interrupt IN. `ep_addr` is the full USB endpoint address (bit7=1 for
     IN, e.g. 0x81). Reply is a 10-byte header + up to `length` data bytes
-    (parse_control_reply). Layout matches pybelkusb's bulkRead."""
+    (parse_control_reply). Layout matches pybelkusb's bulkRead, with the [10:12]
+    half-word carrying the endpoint's real 0x8000|wMaxPacketSize (see bulk_write);
+    defaults to 512, the correct high-speed bulk value the vendor sends."""
     return struct.pack(">HHHHBBHLH",
                        0x0003, seq & 0xFFFF, 0x0003,
                        ((dev_id & 0xFF) << 8) | (ep_addr & 0xFF),
-                       ep_addr & 0x0F, 0x01, 0x8040, 0, length)
+                       ep_addr & 0x0F, 0x01, 0x8000 | (mps & 0x7FFF), 0, length)
 
 
 # A data-channel transfer reply has a 10-byte header, then `size` bytes of data.
