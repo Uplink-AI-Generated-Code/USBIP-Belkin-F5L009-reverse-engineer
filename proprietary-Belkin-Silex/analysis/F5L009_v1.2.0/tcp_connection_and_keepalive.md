@@ -145,6 +145,37 @@ keepalive countdown expiring to a probe that is then retransmit-exhausted. Eithe
 way it is armed at establishment and, per live ablation, **not reset by any
 amount of our bulk / reads / TUR / idle / UDP / SCSI-setup activity**.
 
+## RTT/RTO is refreshed ONLY at handshake + keepalive probe — never by data (2026-10-12)
+
+`tcp_rtt_arm` @0x31642c (sets `[conn+0xf9]=1`, `t_rtseq[0x104]=snd.una[0x90]`,
+`t_rtt_start[0x108]=now`) has exactly **three callers**, all non-data:
+- **0x3176f0** — the SYN send / active-open path (ISS written to 0x90/0x94/0x98, set_state 3→6, `tcp_send_segment(r2=2)`=SYN).
+- **0x319f08** — the SYN-ACK path (`tcp_send_segment(r2=0x12)`=SYN-ACK, set_state 7).
+- **0x31691e** — inside the keepalive-probe path (near `tcp_send_keepalive_probe` @0x31693c).
+
+**There is no `tcp_rtt_arm` on the ordinary data-send path.** So the hub takes an
+RTT sample (and runs the RTO estimator `0x317820`) only at connection setup and
+when it sends a keepalive probe — *never* from CSWs / read data / bulk. This is
+why no amount or shape of data traffic resets the RTO: by design it can't.
+
+The RTO-reset gate in `tcp_ack_process` @0x3187a6→0x3187ce fires only if **all**:
+`[conn+0xf9]` (t_rtt_active) ≠ 0, a local flag `[sp+0x3c]` ≠ 0, and signed
+`recv_ack >= t_rtseq[0x104]` (bpl @0x3187c6) → `bl 0x317820`.
+
+`[conn+0x114]` is the 6000-count timer set by `tcp_arm_open_timer` at open (6000
+ticks ≈ 69 s) AND the ESTABLISHED retransmit countdown; `tcp_keepalive_tick`
+decrements it only when non-zero (0x31918a: `cmp #0; beq skip`). The doc section
+above says it is **disarmed (set 0) at the 7→8 handshake transition** (0x3197a6,
+gated `recv_ack==[conn+0x90]+1`). Our wedge connection *does* ACK ISS+1
+(`ack 93` vs hub ISS 92 in wedge.pcap), so on paper it should be disarmed — yet
+we die at ~69 s = exactly 6000 ticks. So the hinge is one of: (a) the 7→8 disarm
+does not actually land for us, or (b) `[conn+0x114]` is re-armed to 6000 (not a
+small RTO) once in ESTABLISHED and our ACKs never cancel it. Pinning which — the
+cancel-on-ACK of `[conn+0x114]` and the exact 7→8 path — is the remaining work.
+Timer arm/cancel goes through `tcp_timer_sched` @0x318130 (r1: 5=arm, 7=cancel);
+`tcp_ack_process` only calls it (type 7) on its RST paths (0x31889c), not on a
+normal in-window ACK — consistent with normal ACKs NOT cancelling `[conn+0x114]`.
+
 ## Open: what the vendor's establishment does that ours doesn't
 
 Live evidence says the difference is at connection setup, not traffic shape, and

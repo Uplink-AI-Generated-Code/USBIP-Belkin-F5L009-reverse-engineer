@@ -102,11 +102,11 @@
 0x00319558  tcp_input                 # TCP segment state machine; parse hdr, dispatch on [conn+0xd6]
 0x003159ec  tcp_set_state             # set conn state byte [conn+0xd6] (states 8/9 special)
 0x00316458  tcp_send_segment          # send a segment; arg r2 = TCP flags (0x02 SYN,0x04 RST,0x10 ACK,0x12 SYN-ACK)
-0x0031642c  tcp_rtt_arm               # arm RTT timing: [conn+0xf9]=1, t_rtseq[conn+0x104]=snd.una[conn+0x90], t_start[conn+0x108]=now
+0x0031642c  tcp_rtt_arm               # arm RTT timing: [conn+0xf9]=1, t_rtseq[conn+0x104]=snd.una[conn+0x90], t_start[conn+0x108]=now. ONLY 3 callers: 0x3176f0 (SYN), 0x319f08 (SYN-ACK), 0x31691e (keepalive probe) -- NOT the data-send path, so data never refreshes the RTO
 0x00317820  tcp_rto_update            # RTT->RTO estimator; writes RTO/backoff [conn+0x118], clamp runtime min/max
 0x00318204  tcp_ack_process           # process ACK; RTT measure site @0x3187ce (gated t_rtt_active & recv_ack>=t_rtseq)
 0x003190ec  tcp_keepalive_tick        # per-conn tick: dec countdowns [conn+0x124](keepalive,ESTAB only ->probe @0x31693c), [conn+0x100], [conn+0x114](retransmit); retransmit doubles RTO [conn+0x118]@0x3191cc; retries>[conn+0xfb] -> RST @0x3193dc
 0x0031693c  tcp_send_keepalive_probe  # [conn+0x124] expiry: send probe if unacked data ([conn+0x90] snd.una vs [conn+0x98]); sets flag 0x4000 in [conn+0x128], tcp_send_segment(r2=0x18)
 0x003193dc  tcp_drop_rst              # retransmit-exhausted teardown: log, [conn+0x98]->[conn+0x94], tcp_send_segment(r2=4)=RST, set_state(1), 0x337598, teardown 0x318130(,7)
-0x00318c98  tcp_arm_open_timer        # [conn+0x114]=6000 (lit @0x318cc4); armed in opening/teardown states 2/4, disarmed on ESTABLISHED(8). (0x114 doubles as the retransmit countdown once ESTABLISHED.)
+0x00318c98  tcp_arm_open_timer        # [conn+0x114]=6000 (lit @0x318cc4) ~= 69s at the tick rate = the wedge period. Doc says disarmed at 7->8 (0x3197a6, gated recv_ack==snd.una+1); our wedge ACKs ISS+1 yet still dies at ~69s, so either the disarm does not land or 0x114 is re-armed to 6000 in ESTABLISHED and normal ACKs do not cancel it (ack_process only calls timer-cancel type7 on its RST paths). 0x114 also serves as the ESTABLISHED retransmit countdown.
 0x00318130  tcp_timer_sched_teardown  # timer-wheel arm/cancel (r1=type; 5 arm, 7 teardown) via 0x339fa0; manages [conn+0x14] slot and flags [conn+0x126]/0x134/0x136
