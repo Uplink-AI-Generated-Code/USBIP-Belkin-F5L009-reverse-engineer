@@ -176,31 +176,40 @@ Timer arm/cancel goes through `tcp_timer_sched` @0x318130 (r1: 5=arm, 7=cancel);
 `tcp_ack_process` only calls it (type 7) on its RST paths (0x31889c), not on a
 normal in-window ACK — consistent with normal ACKs NOT cancelling `[conn+0x114]`.
 
-## RESOLVED (2026-10-12): the re-arm trigger is a HUB RETRANSMIT
+## Status (2026-10-12): correlation found, but the "retransmit re-arm" theory is REFUTED
 
-Matched captures settle it. `[conn+0x114]` runs its full 6000 ticks (~69 s) to
-RST unless the hub's **retransmit path** fires (one of the only three things,
-with handshake and keepalive probe, that touch the RTO/retransmit machinery —
-`tcp_rtt_arm` has no data-path caller). The hub retransmits its sent data (e.g. a
-23-byte CSW) only when that data stays **unACKed longer than its RTO (~140 ms)**.
+**Observation (robust):** the vendor keeps a connection alive with **delayed ACKs
+(~140 ms) that trigger a hub CSW retransmit roughly every poll**; our clients ACK
+instantly and never trigger a retransmit. Captures:
+`Packet_Dumps/3-minute_idle_flash_drive.pcapng` (vendor idle 192 s, delayed ACK +
+hub retransmit every cycle) vs `scratchpad/ours_tur.pcap` (our 1 Hz TUR, instant
+ACK, zero retransmits, wedge 70.4 s).
 
-- **Vendor** (`Packet_Dumps/3-minute_idle_flash_drive.pcapng`, idle 192 s; and the
-  1 GB capture, 447 s): the Windows client uses **delayed-ACK ~140 ms**, which
-  exceeds the hub RTO, so on *every* ~1 Hz TUR poll the hub resends the CSW
-  before the ACK arrives (visible: duplicate `seq 2962069:2962092`, then a
-  delayed ACK with SACK). Each retransmit refreshes the timer → lives
-  indefinitely.
-- **Us** (`scratchpad/ours_tur.pcap`, our 1 Hz TUR, wedge 70.4 s): macOS Python
-  (and Windows Python) **ACK the CSW instantly** (same-millisecond pure ACK, zero
-  retransmits in the whole capture) → the hub never retransmits → 6000 ticks
-  complete → RST.
+**But a hub retransmit is NOT what re-arms the timer.** Validation (`dnctl` 160 ms
+egress delay on the macOS host → our ACKs arrive ~160 ms late → hub retransmits):
+our delayed connection `192.168.2.50:62970` took **35 hub-retransmits spread
+evenly from 1.4 s to 69.0 s (max gap 2.7 s)** and STILL RST at 70.4 s. If a
+retransmit refreshed `[conn+0x114]`, those 35 would have kept it alive. They did
+not. (Confounds in that run: the blanket delay also broke our OPEN_WAIT handshake
+— many 0.3 s RST'd attach attempts — and the Windows VM's bridged traffic bypasses
+macOS dummynet, so the `.36` 258 s survival in that capture is just the normal
+driver, not our delay.)
 
-So the wedge is not establishment/options/shape/UDP/SCSI at all — it is purely
-the **client TCP stack's ACK latency vs the hub RTO**. The vendor keeps the
-connection alive by accident of Windows' delayed-ACK being slower than the hub's
-retransmit timeout. Remaining firmware detail (nice-to-have, not needed for the
-explanation): the exact instruction in the retransmit path that re-arms
-`[conn+0x114]` / resets the retry counter `[conn+0xfa]` on the retransmit's ACK.
+So the delayed-ACK/retransmit is a *correlate* of the vendor's survival, not the
+mechanism. The wedge remains the `[conn+0x114]` 6000-tick (~69 s) countdown; what
+actually keeps it from completing on the vendor connection is still unknown.
+
+**Narrowed firmware question:** `[conn+0x114]=6000` is set while opening (state
+4) and **disarmed at the 7→8 transition** — the state-7 handler (0x319938) jumps
+to 0x319790 when the arriving segment has ACK set AND `[sp+0x2c]≠0`
+(recv_ack == snd.una+1, i.e. it acks the SYN); 0x3197a6 then zeroes
+`[conn+0x114]`, clears retry `[conn+0xfa]`, and `set_state(8)`. Our clean
+handshake *does* ACK ISS+1, so this should fire — yet we still die at ~6000
+ticks. Either the disarm doesn't actually land for us (state/timing of the
+state-7 handler), or `[conn+0x114]` is re-armed to 6000 after ESTABLISHED. Static
+RE can't see the live state; next step is dynamic (read the hub's live per-conn
+TCP state/timer via its telnet/debug surface) or re-examine the SXUPTP
+CONNECT→accept→state-4/7/8 progression for how our connection differs.
 
 ## (Historical) Open: what the vendor's establishment does that ours doesn't
 
