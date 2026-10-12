@@ -24,8 +24,10 @@ Two interrupt-endpoint shapes:
 """
 from __future__ import annotations
 
+import os
 import socket
 import struct
+import time
 
 from ..sxuptp.client import ChannelMux, SxuptpClient
 from ..sxuptp import protocol as sx
@@ -79,6 +81,44 @@ class Device:
         self.mux = None                        # primary ChannelMux (control + if0)
         self._secondary: list = []             # [(SxuptpClient, ChannelMux), ...]
         self.ep_mux: dict[int, object] = {}    # interrupt ep addr -> owning mux
+        # Mass-storage keep-alive [OPT-IN, OFF BY DEFAULT]: the vendor driver never
+        # lets the bulk pipe go quiet -- it slips a TEST_UNIT_READY (+REQUEST_SENSE)
+        # onto the device every ~0.3-1 s, idle or mid-write, and interleaves ~1200
+        # READ(10) across a large write. Linux goes silent on the bulk pipe while
+        # streaming a big write, which lets the hub's write path back up. Mirror the
+        # vendor: inject our own command between the kernel's commands when the pipe
+        # has been one-directional for too long. SXMS_KEEPALIVE = seconds between
+        # injections (0 = off, the default). NOTE: this materially extends how far a
+        # sustained write streams (the mid-stream wedge moves out by a lot), but it
+        # does NOT overcome this hub's non-deterministic mid-write drops -- direct
+        # SXUPTP tests (no Linux) show the hub can wedge a single 512 B write at
+        # random. See memory bridge-working-usbip. So this is a best-effort aid for
+        # the reliable range (tens of MB), not a guaranteed 128 MB fix.
+        self.mass_storage = False
+        self._ms_bulk_out: int | None = None
+        self._ms_bulk_in: int | None = None
+        self._ka_interval = float(os.environ.get("SXMS_KEEPALIVE", "0") or 0)
+        self._ka_debug = bool(os.environ.get("SXMS_KA_DEBUG"))
+        # Read-drain mode: inject a READ(10) instead of a TUR. A TUR is only a
+        # status poll; a READ forces a real bulk-IN transaction, making the hub
+        # turn its internal bus around and drain its write FIFO -- the vendor's
+        # actual anti-wedge mechanism (its ~1200 interleaved READ(10)). Reads a
+        # fixed, always-valid LBA (default 0 = the boot sector); the data is
+        # discarded, only the IN transaction matters.
+        self._ka_read = bool(os.environ.get("SXMS_KA_READ"))
+        self._ka_read_lba = int(os.environ.get("SXMS_KA_READ_LBA", "0") or 0)
+        # Rotate the read LBA each injection so the hub can't serve it from its
+        # own read cache (a cached read never turns the device bus around and so
+        # never drains the write FIFO). Stride in 512-byte blocks, wrapped in a
+        # safe low window. SXMS_KA_READ_BLOCKS = blocks per read (bus turnaround
+        # scales with transfer size).
+        self._ka_read_stride = int(os.environ.get("SXMS_KA_READ_STRIDE", "2048") or 0)
+        self._ka_read_window = int(os.environ.get("SXMS_KA_READ_WINDOW", "2097152") or 1)
+        self._ka_read_blocks = int(os.environ.get("SXMS_KA_READ_BLOCKS", "8") or 1)
+        self._ka_last = 0.0
+        self._ka_tag = 0xCAFE0000
+        self._ka_n = 0
+        self._ka_fail = 0
 
     # --- lifecycle ------------------------------------------------------
     def attach(self, exclude: tuple[int, ...] = ()) -> u.UsbipDevice:
@@ -169,6 +209,12 @@ class Device:
             # with no data). Mass storage (class 0x08) stays on the synchronous
             # bulk path (request/response, never idle-blocks) — don't disturb it.
             mass_storage = any(cls == 0x08 for cls, _, _ in interfaces)
+            self.mass_storage = mass_storage
+            if mass_storage:
+                outs = [a for a, (attr, _) in self.ep_info.items()
+                        if not (a & 0x80) and attr == 2]
+                self._ms_bulk_out = outs[0] if outs else None
+                self._ms_bulk_in = self.bulk_in_eps[0] if self.bulk_in_eps else None
             async_eps = [] if mass_storage else (self.intr_in_eps + self.bulk_in_eps)
             # The hub splits a composite device's interfaces across SEPARATE
             # nodes/channels (keyboard: dev02=if0/ep81, dev03=if1/ep82) and delivers
@@ -348,11 +394,83 @@ class Device:
                 return (0, data) if status == 0 else (EREMOTEIO, b"")
             if cmd.is_in:                    # bulk IN (non-mux: mass storage)
                 status, data = self.client.bulk_in(ep_addr, cmd.transfer_buffer_length)
+                # A 13-byte "USBS" reply is a CSW -> the device is now idle between
+                # commands, the one safe moment to slip in our keep-alive TUR.
+                if (status == 0 and self._ka_interval and len(data) == 13
+                        and data[:4] == b"USBS"):
+                    self._keepalive()
                 return (0, data) if status == 0 else (EREMOTEIO, b"")
             status = self.client.bulk_out(ep_addr, cmd.transfer_buffer)  # bulk OUT (non-mux)
             return (0, b"") if status == 0 else (EREMOTEIO, b"")
         except Exception:
             return EPIPE, b""
+
+    def _keepalive(self) -> None:
+        """Inject a TEST_UNIT_READY on the mass-storage bulk pipe if it has been
+        quiet for >= _ka_interval, mirroring the vendor's ~0.3-1 Hz poll so the
+        hub's write path keeps turning around and the device does not drop. Called
+        only between the kernel's own commands (right after a CSW), so the
+        Bulk-Only-Transport sequence stays in order. Self-generated; the kernel
+        never sees the injected CBW/CSW. Failures are swallowed -- the keep-alive
+        must never break the real transfer it rides on."""
+        now = time.monotonic()
+        if now - self._ka_last < self._ka_interval:
+            return
+        if self._ms_bulk_out is None or self._ms_bulk_in is None:
+            return
+        self._ka_last = now
+        try:
+            if self._ka_read:
+                # READ(10) 1 block at a fixed LBA -- a real bulk-IN that drains
+                # the hub's write FIFO (see __init__). READ(10) = 0x28; LBA is a
+                # 32-bit big-endian field, transfer length a 16-bit big-endian
+                # block count.
+                lba = self._ka_read_lba
+                blocks = self._ka_read_blocks
+                cdb = (b"\x28\x00" + struct.pack(">I", lba)
+                       + b"\x00" + struct.pack(">H", blocks) + b"\x00")
+                csw_status = self._bot_cmd(cdb, 512 * blocks)
+                # advance for next time, wrapped in the low window
+                self._ka_read_lba = (lba + self._ka_read_stride) % max(
+                    1, self._ka_read_window)
+                tag = "RD"
+            else:
+                # TEST_UNIT_READY, then REQUEST_SENSE iff it reports CHECK
+                # CONDITION -- the vendor's idle poll. Clearing the sense matters
+                # so the kernel's next real command never inherits a stale UNIT
+                # ATTENTION.
+                csw_status = self._bot_cmd(b"\x00", 0)      # TEST_UNIT_READY
+                tag = "TUR"
+            if csw_status is None:
+                self._ka_fail += 1
+                return
+            if csw_status != 0 and not self._ka_read:       # CHECK CONDITION
+                self._bot_cmd(b"\x03\x00\x00\x00\x12\x00", 18)   # REQUEST_SENSE (18B)
+            self._ka_n += 1
+            if self._ka_debug:
+                os.write(2, (f"[ka] {tag} #{self._ka_n} csw={csw_status} "
+                             f"fail={self._ka_fail}\n").encode())
+        except Exception:
+            self._ka_fail += 1
+
+    def _bot_cmd(self, cdb: bytes, data_in_len: int) -> int | None:
+        """Run one self-generated Bulk-Only-Transport command on the mass-storage
+        pipe: send a CBW wrapping `cdb`, read `data_in_len` bytes of data-in (if
+        any), read the 13-byte CSW. Returns the CSW status byte (0 = GOOD), or None
+        on a transport error. The CBW/CSW are never forwarded to the kernel."""
+        self._ka_tag = (self._ka_tag + 1) & 0xFFFFFFFF
+        flags = 0x80 if data_in_len else 0x00               # bmCBWFlags: IN vs none
+        cdb16 = (cdb + bytes(16))[:16]
+        cbw = (b"USBC" + struct.pack("<I", self._ka_tag)
+               + struct.pack("<IBBB", data_in_len, flags, 0x00, len(cdb)) + cdb16)
+        if self.client.bulk_out(self._ms_bulk_out, cbw) != 0:
+            return None
+        if data_in_len:
+            self.client.bulk_in(self._ms_bulk_in, data_in_len)   # data-in, discard
+        _st, csw = self.client.bulk_in(self._ms_bulk_in, 13)
+        if _st != 0 or len(csw) != 13 or csw[:4] != b"USBS":
+            return None
+        return csw[12]                                      # bCSWStatus
 
     def _control(self, cmd: u.CmdSubmit) -> tuple[int, bytes]:
         bm, b_req, w_value, w_index, w_length = struct.unpack("<BBHHH", cmd.setup)
