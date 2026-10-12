@@ -9,3 +9,10 @@ proprietary-Belkin-Silex/analysis/*/disasm_full.asm
 *.unpacked/
 
 __pycache__
+
+# Large raw captures: the big write traces are multi-hundred-MB / >1GB.
+# Keep the small keyboard dumps (already tracked); ignore the bulky ones.
+Packet_Dumps/*GB*.pcapng
+Packet_Dumps/128MB*.pcapng
+# Local test write artifact
+128MB.file.h2w
