@@ -7,24 +7,65 @@ itself. Addresses are in the reconstructed RAM image (load base `0x0`); see
 ## 1. Management / control surface
 
 ### Telnet (TCP 23) — `root`, empty password
-`TELNETD` serves a menu console. Login is **username `root`, empty password**
-(the prompt says root needs a password, but an empty line is accepted). The
-telnet session struct holds an **admin flag at `+0x14`**; privileged menu items
-check it (`ldr r3,[session+0x14]; cmp #0; beq ...` at `0x32f65a`) and otherwise
-print `You must login as an administrator.` (`0x383eb0`). Logging in as `root`
-sets that flag. Top menu:
+
+`TELNETD` serves a menu console (banner `Belkin Network USB Hub Ver 1.2.0 TELNET
+server. / Copyright (C) 2007 Belkin International, Inc.`). Login is **username
+`root`, empty password** (prompt: `'root' user needs password to login.` →
+`password:` → just press Enter). The telnet session struct holds an **admin flag
+at `+0x14`**; privileged menu items check it (`ldr r3,[session+0x14]; cmp #0; beq`
+at `0x32f65a`) and otherwise print `You must login as an administrator.`
+(`0x383eb0`). Logging in as `root` sets that flag.
+
+**It is a pure configuration/status menu — NOT a Unix shell and NOT a debug
+console.** There is no view of live TCP/socket state, per-connection timers,
+retransmit counters, or the SXUPTP/USB job table — the deepest status it exposes
+is an IP summary plus a USB device *count* (see `96 → 1` below). So telnet cannot
+be used to inspect the data-channel connection state behind the ~69 s RST
+([`tcp_connection_and_keepalive.md`](tcp_connection_and_keepalive.md)).
+
+Complete menu tree (mapped live 2026-10-13, read-only; nothing committed).
+`99` = Back/Exit at every level; selecting a scalar opens a value editor:
 
 ```
- 1 : Configure General      (Change root Password; LAN Interface = AUTO)
- 2 : Configure TCP/IP
-96 : Display Status         (system: IP/DHCP/lease; "Number of Device: N")
-97 : Reset Settings to Defaults   [destructive]
-98 : Restart Device Server        [reboot]
-99 : Exit
+level.1 (main)   Please select(1 - 99)?
+  1 : Configure General ............................ level.2
+        1 : Change root Password        : "*******"      (free-text editor)
+        2 : LAN Interface               : AUTO           (enum: 1 AUTO, 2 10 HALF,
+                                                           3 10 FULL, 4 100 HALF, 5 100 FULL)
+  2 : Configure TCP/IP ............................. level.2
+        1 : DHCP/BOOTP                  : ENABLE         (toggle)
+        2 : IP Address                  : 0.0.0.0        [static; SET IP_ADDR is destructive]
+        3 : Subnet Mask                 : 0.0.0.0
+        4 : Default Gateway             : 0.0.0.0
+        5 : IP Filter Configuration ................... level.3
+              1 : IP Filter Mode        : DENY
+              2..9 : Filter #0..#3 Start/End Address : 0.0.0.0   (4 allow/deny ranges)
+        6 : Network PnP                 : ENABLE
+        7 : Host Name                   : "BK11CB6D"
+        8 : WINS ...................................... level.3
+              1 : Primary WINS Server   : 0.0.0.0
+              2 : Secondary WINS Server : 0.0.0.0
+              3 : NetBIOS Scope ID      : ""
+        9 : mDNS                        : ENABLE
+       10 : mDNS Service Name           : "BK11CB6D"
+ 96 : Display Status ................................ (submenu)
+        1 : system   -> read-only dump:
+              TCP/IP status: IP address (DHCP flag), Subnet Mask, Gateway addr,
+                             DHCP Server, Lease time (sec)
+              USB status:    Number of Device: N   (physical devices; a composite
+                             keyboard that enumerates as two devNN nodes counts once)
+ 97 : Reset Settings to Defaults ..................... [DESTRUCTIVE — avoid]
+ 98 : Restart Device Server .......................... [reboot]
+ 99 : Exit
 ```
-`Display Status → system` is a handy read-only view; it reports the **physical**
-USB device count (2 here: the Corsair + the keyboard — the keyboard enumerates
-as two `devNN` nodes but is one device).
+
+Editor behavior (probed on LAN Interface, re-selecting the current value → no
+change): an enumerated field prints its options and `Please select(1 - N)?`; a
+free-text field prompts for a string. **An empty line (Enter) keeps the current
+value and returns to the parent menu**, and out-of-range input is rejected with
+`Data out of range.` — so a field can be opened and backed out of non-
+destructively. (Config writes to EEPROM are the destructive JCP ops listed below;
+avoid committing IP/DHCP/password changes.)
 
 ### Web (HTTP 80) — empty-password login, template engine
 Login posts `login_password` to `/en/login/login.htm` (empty password works;
