@@ -230,6 +230,76 @@ class SxuptpClient:
             time.sleep(0.08)
         raise TimeoutError("could not match the OPEN_WAIT window (power-cycle if slot busy)")
 
+    def reconnect(self, window: float = 5.0) -> int | None:
+        """Re-establish the SXUPTP data channel as a NEW job, to reset the hub's
+        per-connection ~60-70s TCP keepalive/RTO timer that otherwise RSTs a long
+        single transfer (see proprietary-Belkin-Silex/analysis/F5L009_v1.2.0/
+        tcp_connection_and_keepalive.md). The device stays enumerated on the hub;
+        only the transport channel (and its timer) is renewed. Call at a safe
+        Bulk-Only-Transport boundary (right after a CSW, with no transfer
+        in-flight). Reuses the shared session/grant sockets, node and MAC from the
+        original attach. Returns the (possibly new) devId.
+
+        The old channel is RST-closed first (SO_LINGER 0) so its job frees in ~1s;
+        the new connect/commit re-enters OPEN_WAIT and the TCP match is retried
+        across `window`, exactly like attach()."""
+        import time
+        # Free the current job: send EXEC SCANNER DISCONNECT, then RST-close the
+        # TCP (SO_LINGER 0). The firmware frees the slot ~1s after the RST, so a
+        # new CONNECT for the same device NGs until then -- settle before re-connect.
+        try:
+            self._udp.send(p.pack_disconnect(self._mac, self._client_ip, self._node))
+        except OSError:
+            pass
+        if self.tcp is not None:
+            try:
+                self.tcp.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER,
+                                    struct.pack("ii", 1, 0))
+                self.tcp.close()
+            except OSError:
+                pass
+            self.tcp = None
+        time.sleep(1.5)                 # let the hub free the old slot
+        self.seq = 0
+        self._rxbuf = b""
+        self._udp.send(p.pack_connect_init(self._mac, self._client_ip, self._node))
+        try:
+            self._udp.recv(256)
+        except socket.timeout:
+            pass
+        self._udp.send(p.pack_connect_commit(self._mac, self._client_ip, self._node))
+        try:
+            self._udp.recv(256)
+        except socket.timeout:
+            pass
+        if self._bc is not None:
+            self._bc.settimeout(0.0)
+            try:
+                d, a = self._bc.recvfrom(4096)
+                if a[0] == self.host and len(d) > 3:
+                    self.dev_id = d[3]
+            except (BlockingIOError, OSError):
+                pass
+        t0 = time.time()
+        while time.time() - t0 < window:
+            s = socket.socket()
+            s.settimeout(0.5)
+            try:
+                s.bind((self._client_ip, 0))
+                s.connect((self.host, self.port))
+                s.settimeout(0.5)
+                try:
+                    s.recv(1)
+                except socket.timeout:
+                    pass
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+                self.tcp = s
+                return self.dev_id
+            except (ConnectionResetError, ConnectionAbortedError, OSError):
+                s.close()
+            time.sleep(0.08)
+        raise TimeoutError("reconnect: could not match the OPEN_WAIT window")
+
     def _control(self, dev_id: int, setup: p.Setup, data: bytes = b"") -> tuple[int, bytes]:
         """One control transfer on an open channel -> (status, data). CONFIRMED."""
         if self.tcp is None:

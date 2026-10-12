@@ -119,6 +119,20 @@ class Device:
         self._ka_tag = 0xCAFE0000
         self._ka_n = 0
         self._ka_fail = 0
+        # Data-channel RECONNECT workaround (the reliable fix for the ~60-70s hub
+        # RST). The hub has a per-TCP-connection keepalive/RTO timer that RSTs a
+        # single long transfer at ~68s regardless of traffic (see
+        # proprietary-Belkin-Silex/analysis/F5L009_v1.2.0/
+        # tcp_connection_and_keepalive.md -- the root reset condition the vendor
+        # driver uses could not be reproduced). A fresh connection has a fresh
+        # timer, so we transparently re-establish the SXUPTP data channel every
+        # SXMS_RECONNECT_SECS seconds, at a Bulk-Only-Transport boundary (right
+        # after a CSW). Proven: 256MB written through 3 reconnects, no wedge.
+        # 0 = off (default). Use e.g. 50 (comfortably under ~68s).
+        self._reconnect_secs = float(os.environ.get("SXMS_RECONNECT_SECS", "0") or 0)
+        self._reconnect_debug = bool(os.environ.get("SXMS_RECONNECT_DEBUG"))
+        self._reconnect_last = 0.0
+        self._reconnect_n = 0
 
     # --- lifecycle ------------------------------------------------------
     def attach(self, exclude: tuple[int, ...] = ()) -> u.UsbipDevice:
@@ -395,15 +409,42 @@ class Device:
             if cmd.is_in:                    # bulk IN (non-mux: mass storage)
                 status, data = self.client.bulk_in(ep_addr, cmd.transfer_buffer_length)
                 # A 13-byte "USBS" reply is a CSW -> the device is now idle between
-                # commands, the one safe moment to slip in our keep-alive TUR.
-                if (status == 0 and self._ka_interval and len(data) == 13
-                        and data[:4] == b"USBS"):
-                    self._keepalive()
+                # commands, the one safe moment to slip in our keep-alive TUR or to
+                # reconnect the data channel (reset the hub's ~68s connection timer).
+                if (status == 0 and len(data) == 13 and data[:4] == b"USBS"):
+                    if self._ka_interval:
+                        self._keepalive()
+                    if self._reconnect_secs:
+                        self._maybe_reconnect()
                 return (0, data) if status == 0 else (EREMOTEIO, b"")
             status = self.client.bulk_out(ep_addr, cmd.transfer_buffer)  # bulk OUT (non-mux)
             return (0, b"") if status == 0 else (EREMOTEIO, b"")
         except Exception:
             return EPIPE, b""
+
+    def _maybe_reconnect(self) -> None:
+        """Re-establish the mass-storage data channel once it has been up for
+        >= _reconnect_secs, resetting the hub's per-connection ~68s keepalive/RTO
+        RST timer so an arbitrarily large transfer can complete. Called only at a
+        CSW boundary (Bulk-Only-Transport-safe). reconnect() renews the TCP channel
+        as a new job and re-captures the devId; the kernel never sees it. On
+        failure the channel is down and the transfer fails like an un-worked-around
+        wedge would -- this is a best-effort opt-in."""
+        now = time.monotonic()
+        if self._reconnect_last == 0.0:
+            self._reconnect_last = now          # start the clock at the first CSW
+            return
+        if now - self._reconnect_last < self._reconnect_secs:
+            return
+        try:
+            did = self.client.reconnect()
+            self._reconnect_last = time.monotonic()
+            self._reconnect_n += 1
+            if self._reconnect_debug:
+                os.write(2, (f"[reconnect] #{self._reconnect_n} devId={did}\n").encode())
+        except Exception as e:
+            if self._reconnect_debug:
+                os.write(2, (f"[reconnect] FAILED: {e}\n").encode())
 
     def _keepalive(self) -> None:
         """Inject a TEST_UNIT_READY on the mass-storage bulk pipe if it has been
