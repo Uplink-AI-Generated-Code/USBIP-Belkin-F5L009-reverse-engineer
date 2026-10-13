@@ -310,7 +310,17 @@ class Handler(socketserver.BaseRequestHandler):
             if imported:
                 print(f"[usbip] detached {busid}")
 
-    def _complete_async(self, cmd, status: int, data: bytes) -> None:
+    @staticmethod
+    def _ret_submit(cmd, status: int, data) -> bytes:
+        """RET_SUBMIT bytes for a completed async URB. An ISO URB's `data` is its
+        per-packet result list; a failed one reports every packet as errored."""
+        if cmd.iso_packets:
+            if status != 0:
+                data = [(status, 0, b"")] * len(cmd.iso_packets)
+            return u.pack_ret_submit_iso(cmd, cmd.iso_packets, data)
+        return u.pack_ret_submit(cmd, status, data)
+
+    def _complete_async(self, cmd, status: int, data) -> None:
         """Complete an async (interrupt/bulk-IN) URB from the mux reader thread.
         Dropped if the URB was already UNLINKed by the kernel — sending a
         RET_SUBMIT for an unlinked seqnum makes the client drop the whole device
@@ -322,7 +332,7 @@ class Handler(socketserver.BaseRequestHandler):
                 return
             unl = self._unlink_after.pop(cmd.seqnum, None)
             try:
-                self.request.sendall(u.pack_ret_submit(cmd, status, data))
+                self.request.sendall(self._ret_submit(cmd, status, data))
                 if unl is not None:
                     self.request.sendall(u.pack_ret_unlink(unl, 0))
             except OSError:
@@ -347,21 +357,27 @@ class Handler(socketserver.BaseRequestHandler):
                         cmd.transfer_buffer = self._recvall(cmd.transfer_buffer_length)
                     if cmd.iso_desc_len:
                         # ISO URB: its packet descriptors follow the OUT data and
-                        # must be consumed to stay framed. The hub bridge has no
-                        # isochronous path, so fail it (-EPIPE) without touching
-                        # the device.
+                        # must be consumed to stay framed. Isochronous IN on a
+                        # registered endpoint is served; anything else (ISO OUT, an
+                        # unknown endpoint, descriptors that don't fit the buffer)
+                        # fails with -EPIPE without touching the device.
                         if cmd.number_of_packets > u.MAX_ISO_PACKETS:
                             print(f"[usbip] bogus ISO packet count "
                                   f"{cmd.number_of_packets}; closing connection")
                             return
                         descs = self._recvall(cmd.iso_desc_len)
-                        with self._send_lock:
-                            try:
-                                self.request.sendall(
-                                    u.pack_ret_submit_iso_error(cmd, EPIPE, descs))
-                            except OSError:
-                                pass
-                        continue
+                        pkts = u.parse_iso_descs(descs)
+                        if dev.is_isoc(cmd) and sum(l for _o, l in pkts) <= \
+                                cmd.transfer_buffer_length:
+                            cmd.iso_packets = pkts
+                        else:
+                            with self._send_lock:
+                                try:
+                                    self.request.sendall(
+                                        u.pack_ret_submit_iso_error(cmd, EPIPE, descs))
+                                except OSError:
+                                    pass
+                            continue
                 except ConnectionError:
                     return
                 if _TRACE:

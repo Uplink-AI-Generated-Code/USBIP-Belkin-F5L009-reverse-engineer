@@ -146,6 +146,7 @@ class Device:
         # async-read endpoint addrs, in descriptor order (interrupt-IN, bulk-IN).
         self.intr_in_eps: list[int] = []
         self.bulk_in_eps: list[int] = []
+        self.isoc_in_eps: list[int] = []
         self._async_eps: list[int] = []
         self.mux = None                        # primary ChannelMux (control + if0)
         self._secondary: list = []             # [(SxuptpClient, ChannelMux), ...]
@@ -249,6 +250,8 @@ class Device:
                             self.intr_in_eps.append(addr)
                         elif attr == 2:
                             self.bulk_in_eps.append(addr)
+                        elif attr == 1 and addr not in self.isoc_in_eps:
+                            self.isoc_in_eps.append(addr)    # same ep recurs per alt setting
                 i += blen
 
             # Endpoints whose reads can block and must run async through a
@@ -262,7 +265,8 @@ class Device:
                         if not (a & 0x80) and attr == 2]
                 self._ms_bulk_out = outs[0] if outs else None
                 self._ms_bulk_in = self.bulk_in_eps[0] if self.bulk_in_eps else None
-            async_eps = [] if mass_storage else (self.intr_in_eps + self.bulk_in_eps)
+            async_eps = [] if mass_storage else (self.intr_in_eps + self.bulk_in_eps
+                                                 + self.isoc_in_eps)
             # The hub splits a composite device's interfaces across SEPARATE
             # nodes/channels (keyboard: dev02=if0/ep81, dev03=if1/ep82) and delivers
             # each endpoint's reports only on its own node's channel. So if any
@@ -341,6 +345,8 @@ class Device:
                 if ep in self.intr_in_eps:
                     mux.register_intr(ep, self.ep_mps.get(ep, 8) or 8,
                                       self.ep_info[ep][1])
+                elif ep in self.isoc_in_eps:
+                    mux.register_isoc_in(ep)
                 else:
                     mux.register_bulk_in(ep)
                 self.ep_mux[ep] = mux
@@ -425,11 +431,25 @@ class Device:
             return False
         return ((cmd.ep & 0x0F) | 0x80) in self.ep_mux
 
+    def is_isoc(self, cmd: u.CmdSubmit) -> bool:
+        """True if this SUBMIT targets an isochronous-IN endpoint we can serve."""
+        return (cmd.is_in and ((cmd.ep & 0x0F) | 0x80) in self.isoc_in_eps
+                and ((cmd.ep & 0x0F) | 0x80) in self.ep_mux)
+
     def enqueue_async(self, cmd: u.CmdSubmit, complete) -> None:
-        """Hand an async IN URB (interrupt or bulk) to its endpoint's mux;
-        `complete(cmd, status, data)` runs when the reply arrives (status 0 = OK)."""
+        """Hand an async IN URB (interrupt, bulk or isochronous) to its endpoint's
+        mux; `complete(cmd, status, data)` runs when the reply arrives (status 0 =
+        OK). For an ISO URB (cmd.iso_packets set) `data` is the per-packet result
+        list [(status, actual_length, data)] instead of bytes."""
         ep_addr = (cmd.ep & 0x0F) | 0x80
         mux = self.ep_mux[ep_addr]
+        if cmd.iso_packets:
+            mux.enqueue_isoc(
+                ep_addr, cmd,
+                lambda c, st, pkts: complete(c, 0 if st == 0 else EREMOTEIO,
+                                             pkts if st == 0 else []),
+                [length for _off, length in cmd.iso_packets])
+            return
         cb = (lambda c, st, data: complete(
             c, 0 if st == 0 else EREMOTEIO, data if st == 0 else b""))
         if ep_addr in self.intr_in_eps:

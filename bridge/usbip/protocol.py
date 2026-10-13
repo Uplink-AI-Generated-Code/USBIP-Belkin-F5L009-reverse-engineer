@@ -143,6 +143,7 @@ class CmdSubmit:
     interval: int
     setup: bytes                        # 8 raw USB SETUP bytes
     transfer_buffer: bytes = b""        # OUT data (IN: empty)
+    iso_packets: list = field(default_factory=list)   # ISO: [(offset, length)] per packet
 
     @property
     def is_in(self) -> bool:
@@ -215,6 +216,39 @@ def pack_ret_submit_iso_error(cmd: CmdSubmit, status: int, iso_descs: bytes) -> 
     return hdr + out
 
 
+def parse_iso_descs(buf: bytes) -> list[tuple[int, int]]:
+    """The (offset, length) of each packet in a SUBMIT's iso_packet_descriptor
+    array (16 bytes per packet; actual_length/status are unused on submit)."""
+    return [_ISO_DESC.unpack_from(buf, i * _ISO_DESC.size)[:2]
+            for i in range(len(buf) // _ISO_DESC.size)]
+
+
+def pack_ret_submit_iso(cmd: CmdSubmit, descs: list[tuple[int, int]],
+                        results: list[tuple[int, int, bytes]]) -> bytes:
+    """RET_SUBMIT for a completed isochronous IN URB.
+
+    `descs` are the SUBMIT's (offset, length) per packet; `results` the outcome per
+    packet as (status, actual_length, data). Wire layout (Linux stub_tx / vhci_rx):
+    48-byte header, then the packets' data COMPACTED back to back (no gaps for
+    short or empty packets -- vhci re-pads it to the URB's offsets), then the
+    16-byte iso descriptors. vhci requires sum(actual_length) == the header's
+    actual_length, and a packet may not report more than it was given room for.
+    """
+    out_descs, blob, errors = [], [], 0
+    for (off, length), (st, actual, data) in zip(descs, results):
+        actual = min(actual, length, len(data))
+        if st != 0:
+            errors += 1
+            actual = 0
+        out_descs.append(_ISO_DESC.pack(off, length, actual, st))
+        blob.append(data[:actual])
+    payload = b"".join(blob)
+    hdr = _BASIC.pack(USBIP_RET_SUBMIT, cmd.seqnum, cmd.devid, cmd.direction, cmd.ep)
+    hdr += _RET_SUBMIT_TAIL.pack(0, len(payload), cmd.start_frame,
+                                 len(descs), errors, b"\x00" * 8)
+    return hdr + payload + b"".join(out_descs)
+
+
 def pack_ret_unlink(cmd: CmdUnlink, status: int) -> bytes:
     hdr = _BASIC.pack(USBIP_RET_UNLINK, cmd.seqnum, cmd.devid, 0, 0)
     hdr += _UNLINK_TAIL.pack(status & 0xFFFFFFFF, b"\x00" * 24)
@@ -277,6 +311,25 @@ def _selftest() -> None:
     st, act, _sf, npk, ec = struct.unpack_from(">iIIII", ret, 20)
     assert (st, act, npk, ec) == (-32, 0, 3, 3)
     assert _ISO_DESC.unpack_from(ret, CMD_HDR_LEN + 16) == (128, 128, 0, -32)
+
+    # ISO IN completion: data is compacted, descriptors follow, header sums match
+    descs = parse_iso_descs(b"".join(_ISO_DESC.pack(i * 128, 128, 0, 0) for i in range(3)))
+    assert descs == [(0, 128), (128, 128), (256, 128)]
+    ret = pack_ret_submit_iso(iso, descs, [(0, 4, b"abcd"), (0, 0, b""), (0, 2, b"ef")])
+    st, act, sf, npk, ec = struct.unpack_from(">iIIII", ret, 20)
+    assert (st, act, npk, ec) == (0, 6, 3, 0), (st, act, npk, ec)
+    assert ret[CMD_HDR_LEN:CMD_HDR_LEN + 6] == b"abcdef"
+    d0 = _ISO_DESC.unpack_from(ret, CMD_HDR_LEN + 6)
+    d2 = _ISO_DESC.unpack_from(ret, CMD_HDR_LEN + 6 + 32)
+    assert d0 == (0, 128, 4, 0) and d2 == (256, 128, 2, 0)
+    assert len(ret) == CMD_HDR_LEN + 6 + 48
+    # a failed packet reports its status, zero bytes, and counts as an error;
+    # a hub that over-delivers is clamped to the packet's room
+    ret = pack_ret_submit_iso(iso, descs, [(-71, 9, b"zzzzzzzzz"), (0, 500, b"x" * 500),
+                                           (0, 1, b"q")])
+    st, act, sf, npk, ec = struct.unpack_from(">iIIII", ret, 20)
+    assert (act, ec) == (128 + 1, 1), (act, ec)   # 0 + clamped 128 + 1
+    assert _ISO_DESC.unpack_from(ret, CMD_HDR_LEN + 129) == (0, 128, 0, -71)
 
     # UNLINK round-trip
     u = _BASIC.pack(USBIP_CMD_UNLINK, 9, d.devid, 0, 0) + _UNLINK_TAIL.pack(7, b"\x00" * 24)

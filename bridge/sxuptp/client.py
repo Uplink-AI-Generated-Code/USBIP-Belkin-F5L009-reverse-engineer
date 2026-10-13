@@ -907,6 +907,38 @@ def _mux_trace(line: str) -> None:
     os.write(2, f"[mux   {time.monotonic():.4f}] {line}\n".encode())
 
 
+# Per-packet status for an isoc packet the hub failed or garbled (-EPROTO).
+ISOC_PKT_ERR = -71
+
+
+class _IsocJob:
+    """One kernel isochronous URB in flight: its per-packet results, filled in
+    as the hub's chunk replies arrive (see ChannelMux.enqueue_isoc)."""
+
+    def __init__(self, urb, complete, npackets: int):
+        self.urb = urb
+        self.complete = complete
+        self.outstanding = 0                  # chunk requests not yet answered
+        self.cancelled = False
+        self.results = [(ISOC_PKT_ERR, 0, b"")] * npackets
+
+    def fill(self, first: int, count: int, status: int, body: bytes) -> None:
+        """Record one chunk reply. A failed or malformed reply leaves that
+        chunk's packets as errors rather than failing the whole URB."""
+        self.outstanding -= 1
+        if status != p.STATUS_OK:
+            return
+        try:
+            pkts = p.parse_isoc_reply(body)
+        except ValueError:
+            return
+        if len(pkts) != count:
+            return
+        for i, pk in enumerate(pkts):
+            self.results[first + i] = (0 if pk.status == 0 else ISOC_PKT_ERR,
+                                       pk.actual_length, pk.data)
+
+
 class ChannelMux:
     """Multiplex control + interrupt + bulk over ONE attached SXUPTP channel.
 
@@ -943,6 +975,9 @@ class ChannelMux:
         self._bulk_deferred: dict[int, object] = {}        # id(urb) -> urb, throttled, read not yet sent
         self._bulk_spill: dict[int, "collections.deque"] = {}  # bulk ep -> data of reads whose URB was unlinked
         self._next_read_at: dict[int, float] = {}          # bulk ep -> earliest next read (throttle)
+        self._isoc_in: set[int] = set()                    # registered isochronous-IN eps
+        self._isoc_pending: dict[int, tuple] = {}          # isoc request seq -> (job, first packet, count)
+        self._isoc_jobs: dict[int, "_IsocJob"] = {}        # id(urb) -> job, until completed/cancelled
         self._ctrl: dict[int, list] = {}                   # control/bulk-out seq -> [Event, result]
         self._err: Exception | None = None
         self._alive = True
@@ -1089,6 +1124,62 @@ class ChannelMux:
         else:
             send()
 
+    # --- isochronous IN (async, pipelined) ----------------------------------
+    # The hub answers an isoc request after ~20 ms whatever its size, and drops
+    # the microframes between requests, so a stream needs several requests in
+    # flight at once: unlike interrupt/bulk, every isoc URB is sent to the hub
+    # the moment it arrives. The reply's size field is a u16, so a URB whose
+    # table + payload would not fit is split into several requests (chunks).
+    _ISOC_MAX_REPLY = 60000
+
+    def register_isoc_in(self, ep_addr: int) -> None:
+        self._isoc_in.add(ep_addr)
+
+    @classmethod
+    def _isoc_chunks(cls, lengths: list[int]) -> list[tuple[int, int]]:
+        """Split packet lengths into (first, count) runs whose reply fits the
+        u16 size field: 2 + 12*count + sum(lengths) <= _ISOC_MAX_REPLY."""
+        chunks, first = [], 0
+        while first < len(lengths):
+            count, size = 0, 2
+            while first + count < len(lengths):
+                nxt = size + 12 + lengths[first + count]
+                if nxt > cls._ISOC_MAX_REPLY and count:
+                    break
+                size, count = nxt, count + 1
+            chunks.append((first, count))
+            first += count
+        return chunks
+
+    def enqueue_isoc(self, ep: int, urb, complete, lengths: list[int],
+                     interval: int = 1) -> None:
+        """Register a kernel isochronous-IN URB with len(lengths) packets.
+        `complete(urb, status, packets)` runs once every chunk has replied, with
+        `packets` = [(status, actual_length, data)] per packet (status 0 = OK;
+        `status` is non-zero only if the channel died)."""
+        job = _IsocJob(urb, complete, len(lengths))
+        mps = max(lengths) if lengths else 0
+        with self._lock:
+            if self._err:
+                dead = True
+            else:
+                dead = False
+                self._isoc_jobs[id(urb)] = job
+                try:
+                    for first, count in self._isoc_chunks(lengths):
+                        self.c.seq = (self.c.seq + 1) & 0xFFFF
+                        seq = self.c.seq
+                        job.outstanding += 1
+                        self._isoc_pending[seq] = (job, first, count)
+                        self.c.tcp.sendall(p.isoc_read(
+                            self.c.dev_id, ep, lengths[first:first + count],
+                            seq=seq, mps=mps, interval=interval))
+                except OSError:
+                    dead = True              # channel died mid-send; the reader sweeps it
+                    self._isoc_jobs.pop(id(urb), None)
+        if dead:
+            complete(urb, EREMOTEIO_, [])
+
     # --- UNLINK ------------------------------------------------------------
     def cancel_urb(self, ep: int, urb) -> bool:
         """Withdraw a queued async URB (kernel UNLINK). True = it was still pending
@@ -1105,6 +1196,12 @@ class ChannelMux:
             and on a real HC the unread bytes would simply stay in the device FIFO.
         """
         with self._lock:
+            job = self._isoc_jobs.pop(id(urb), None)
+            if job is not None:
+                # Requests already on the wire still get replies; the reader
+                # drops them (the camera keeps streaming either way).
+                job.cancelled = True
+                return True
             pend = self._pending.get(ep)
             if pend is not None:
                 for item in pend:
@@ -1221,6 +1318,12 @@ class ChannelMux:
                             # its URB was unlinked: keep the payload for the next one
                             # (status-only FTDI replies carry nothing worth keeping)
                             self._bulk_spill[bep].append(data)
+                    elif seq in self._isoc_pending:     # isochronous-IN reply
+                        job, first, count = self._isoc_pending.pop(seq)
+                        job.fill(first, count, status, data)
+                        if job.outstanding == 0 and not job.cancelled:
+                            self._isoc_jobs.pop(id(job.urb), None)
+                            done = (job.complete, job.urb, 0, job.results)
                     else:                               # control / bulk-out ack
                         w = self._ctrl.get(seq)
                         if w is not None:
@@ -1240,6 +1343,10 @@ class ChannelMux:
                 pend_all += [(cb, urb) for urb, cb, _ep, _len in self._bulk_pending.values()
                              if urb is not None]
                 self._bulk_pending.clear()
+                pend_all += [(j.complete, j.urb) for j in self._isoc_jobs.values()
+                             if not j.cancelled]
+                self._isoc_jobs.clear()
+                self._isoc_pending.clear()
             for complete, urb in pend_all:
                 try:
                     complete(urb, EREMOTEIO_, b"")
