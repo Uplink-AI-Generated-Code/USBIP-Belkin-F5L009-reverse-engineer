@@ -333,27 +333,36 @@ but back in scope now that the cause is localized to establishment.
 ~~OLD working model (refuted — see TL;DR): back-to-back bulk coalesces ACKs and
 starves RTT samples, paced bidirectional keeps them flowing.~~
 
-## Key field offsets (per TCP connection struct)
+## Key field offsets (per TCP connection struct, stride 0x1a0)
 
-| offset | meaning |
-|-------:|---------|
-| 0x14 | packet buffer base (TCP header at `[0x14]+[0x20]`) |
-| 0x90 | snd.una / RTT-timed seq base (`t_rtseq` source); = ISS at setup |
-| 0x94, 0x98 | send-seq pointers (snd.nxt / snd.max); = ISS at setup |
-| 0x9c | send window |
-| 0xc0 | rcv.nxt |
-| 0xd6 | **connection state byte** (FSM state; jump table index = state-4) |
-| 0xe4 | idle-timeout for OPEN_WAIT jobs (0 = disabled once active) |
-| 0xf9 | `t_rtt_active` (RTT timing in progress) |
-| 0xfa / 0xfb | retransmit **retry counter** / retry **limit** (0xfa≥0xfb → RST @0x3193dc) |
-| 0x100 | per-tick countdown (0x80<<1); on 0 → 0x31945c |
-| 0x104 | `t_rtseq` (sequence being RTT-timed) |
-| 0x108 | `t_rtt_start` (timestamp, from `0x335210`) |
-| 0x114 | **retransmit countdown** (0x8a<<1); on 0 → retransmit (double 0x118) or, retries spent, RST @0x3193dc. (Also used as the 6000 open-timer while opening; disarmed at ESTABLISHED.) |
-| 0x118 | **RTO / backoff counter**, doubled per retransmit (0x3191cc); reset by the RTT estimator `0x317820` when an ACK covers `t_rtseq` |
-| 0x124 | **keepalive-idle countdown** (0x92<<1); decremented per tick in ESTABLISHED; on 0 → keepalive probe `0x31693c` |
-| 0x126 | timer/flags half-word (bits tested by the scheduler @0x318130) |
-| 0x134/0x136 | close/retry state byte + a secondary countdown |
+Names assigned by this project (see [`ram/symbols.txt`](ram/symbols.txt) for the
+full struct glossary, including the SXUPTP job struct); "?" = unverified.
+
+| offset | name | meaning |
+|-------:|------|---------|
+| 0x14 | `t_segbuf` | current RX segment buffer (TCP header at `t_segbuf+t_hdroff`) |
+| 0x16 | `t_jobevent` | event code posted to the owning SXUPTP job (5/6 seen) |
+| 0x20 | `t_hdroff` | TCP-header offset within `t_segbuf` |
+| 0x90 | `snd_una` | oldest unacked seq / RTT-timed seq base; = ISS at setup |
+| 0x94, 0x98 | `snd_nxt`, `snd_max` | send-seq pointers; = ISS at setup |
+| 0x9c | `snd_wnd` | peer's receive window |
+| 0xc0 | `rcv_nxt` | next expected receive seq |
+| 0xd6 | `t_state` | **connection state byte** (FSM state; jump index = state−4) |
+| 0xd7 | `t_prevstate` | previous state (saved by `tcp_set_state`) |
+| 0xd8 / 0xdc | `t_rxseq` / `t_rxack` | last received seq / ack |
+| 0xec | `t_job` | back-pointer to the owning SXUPTP job |
+| 0xe4 (job) | `sj_openwait_to` | OPEN_WAIT idle-timeout (0 = disabled once ACTIVE) |
+| 0xf9 | `t_rtt_active` | RTT timing in progress |
+| 0xfa / 0xfb | `t_rxtshift` / `t_rxtmax` | retransmit retry counter / limit (`t_rxtshift ≥ t_rxtmax` → RST @0x3193dc) |
+| 0x100 | `t_timer_100` | per-tick countdown; expiry posts job-event 6 (0x31945c). **Multi-purpose** (also written by `tcp_output`/retransmit, zeroed by recv tail) — role as a fixed lease not proven |
+| 0x104 | `t_rtseq` | sequence being RTT-timed |
+| 0x108 | `t_rtt_start` | RTT start timestamp (from `0x335210`) |
+| 0x114 | `t_timer_rexmt` | **retransmit countdown** (0x8a<<1); on 0 → retransmit (double `t_rto`) or, retries spent, RST @0x3193dc. **Also the 6000 OPEN watchdog while opening; disarmed at the 7→8 transition.** |
+| 0x118 | `t_rto` | **RTO / backoff counter**, doubled per retransmit (0x3191cc); reset by the RTT estimator `0x317820` when an ACK covers `t_rtseq` |
+| 0x124 | `t_timer_keepidle` | **keepalive-idle countdown** (0x92<<1); decremented per tick in ESTABLISHED; on 0 → keepalive probe `0x31693c` |
+| 0x126 | `t_timerflags` | timer/flags half-word (bits tested by the scheduler @0x318130) |
+| 0x128 | `t_flags` | conn flags word: `0x20000` closing (set by `tcp_abort_close`), `0x4000` keepalive-probe pending, bit15 waiter-present |
+| 0x134 / 0x136 | `t_closestate` / `t_timer_dead` | close/retry state byte + a per-tick countdown → RST @0x319368 that is **never armed** (dead path) |
 
 ## Tooling
 

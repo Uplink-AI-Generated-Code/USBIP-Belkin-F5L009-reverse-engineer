@@ -161,4 +161,67 @@
 0x003193dc  tcp_drop_rst_retx         # retransmit-exhausted teardown (needs real outstanding data + [conn+0xfa]>=[conn+0xfb]): log, [0x98]->[0x94], tcp_send_segment(r2=4)=RST, set_state(1), 0x337598, teardown 0x318130(,7)
 0x00319368  tcp_drop_rst_timer136     # RST on [conn+0x136] expiry: log, tcp_send_segment(r2=4)=RST, set_state(1), teardown 0x318130(,7). DEAD PATH: [conn+0x136] is never armed nonzero
 0x00318c98  tcp_arm_open_timer        # OPEN/SYN_RCVD watchdog: [conn+0xfa]=0, [conn+0x114]=6000 (lit @0x318cc4), set_state(arg), arm timer type5. Only 6000-arm in the image; disarmed at 7->8
-0x00318130  tcp_timer_sched           # timer-wheel arm/cancel (r1=type; 5 arm, 7 teardown) via 0x339fa0/0x3159d0; on cleanup clears [conn+0x14], [conn+0x134]=3, [conn+0x136]=0
+0x00318130  tcp_timer_sched           # timer-wheel arm/cancel (r1=type; 5 arm, 7 teardown) via 0x339fa0/0x3159d0; on cleanup clears t_segbuf, t_closestate=3, t_timer_dead=0
+
+# --- struct layouts (names assigned this project; "?" = unverified) ----------
+# TCP connection struct  (stride 0x1a0). Prefix t_ / snd_ / rcv_.
+#   0x14  t_segbuf          current RX segment buffer (TCP hdr base = t_segbuf+t_hdroff)
+#   0x16  t_jobevent        event code posted to the owning SXUPTP job (5,6 seen)
+#   0x18  t_waitq           wait/notify object (post 0x334b6c / wait 0x33493c)
+#   0x20  t_hdroff          TCP-header offset within t_segbuf
+#   0x38  t_lock            per-conn lock (acquire 0x334734 / release 0x3347d8)
+#   0x64  t_portkey         local/listen port key (matched to sj_portkey)
+#   0x68  t_peerport?       port value used in logs
+#   0x90  snd_una           oldest unacked seq; source of the RTT-timed seq
+#   0x94  snd_nxt           next seq to send
+#   0x98  snd_max           highest seq sent
+#   0x9c  snd_wnd           peer's advertised receive window
+#   0xa4  snd_bufq          send buffer/queue object (0x3375ac = bytes pending)
+#   0xc0  rcv_nxt           next expected receive seq
+#   0xc8  t_timer_slot?     pending timer-wheel slot (checked in tcp_abort_close)
+#   0xce  rcv_wnd           our advertised receive window
+#   0xd4  rcv_bufsz         receive buffer size (used >>1)
+#   0xd6  t_state           connection FSM state (tcp_input jump index = state-4)
+#   0xd7  t_prevstate       previous state (saved by tcp_set_state)
+#   0xd8  t_rxseq           last received seq (new-data detect)
+#   0xdc  t_rxack           last received ack
+#   0xec  t_job             back-pointer to the owning SXUPTP job
+#   0xf9  t_rtt_active      RTT timing in progress
+#   0xfa  t_rxtshift        retransmit retry counter (>= t_rxtmax -> RST 0x3193dc)
+#   0xfb  t_rxtmax          retransmit retry limit
+#   0xfd  t_dupacks         duplicate-ACK counter
+#   0x100 t_timer_100       per-tick countdown; expiry posts job-event 6 (0x31945c).
+#                           MULTI-PURPOSE: also written by tcp_output/retransmit
+#                           (0x3175a0,0x317314) and zeroed by recv tail (0x316d4e);
+#                           role as a fixed lease NOT proven (likely persist/output)
+#   0x104 t_rtseq           sequence currently being RTT-timed
+#   0x108 t_rtt_start       RTT start timestamp (0x335210)
+#   0x114 t_timer_rexmt     retransmit countdown; == 6000 OPEN watchdog while
+#                           opening (set by tcp_arm_open_timer), disarmed at 7->8
+#   0x118 t_rto             retransmit timeout / backoff (doubled per retransmit)
+#   0x11c t_rxt_remain?     (0x8e<<1) retransmit-segment counter, dec in ack path
+#   0x124 t_timer_keepidle  keepalive-idle countdown (decremented in ESTAB only)
+#   0x126 t_timerflags      timer-scheduler flags halfword
+#   0x128 t_flags           conn flags word: 0x20000 closing (set by tcp_abort_close),
+#                           0x4000 keepalive-probe pending, bit15 waiter-present
+#   0x134 t_closestate      close/retry state byte
+#   0x136 t_timer_dead      (0x9b<<1) per-tick countdown -> RST 0x319368; NEVER
+#                           armed nonzero (only cleared 0x318178) = dead path
+#
+# SXUPTP job struct  (stride 0xe8). Prefix sj_.
+#   0x00  sj_inuse          slot-in-use (halfword, !=0)
+#   0x04  sj_state          FSM state (sxuptp_conn_state_machine jump @0x37b6d4)
+#   0x0c  sj_conn           owning TCP connection pointer
+#   0x10  sj_createtick     job-alloc timestamp (status/uptime string only)
+#   0x20  sj_devctx         USB device context pointer
+#   0x28  sj_portkey        listen/port key (matched to conn t_portkey at accept)
+#   0x3c  sj_ring_head?     data-ring producer index
+#   0x40  sj_ring_tail?     data-ring consumer index
+#   0x44  sj_buf            I/O buffer (freed on close)
+#   0x48  sj_ring_count?    pending byte/record count
+#   0xe0  sj_graceful       close mode: 0 -> abort/RST, !=0 -> graceful/FIN
+#   0xe4  sj_openwait_to    OPEN_WAIT idle-timeout (cleared when job goes ACTIVE)
+#   0xea  sj_refcnt         refcount (incremented by the establish hook 0x317a44)
+#
+# USB device context (sj_devctx):
+#   0xd0  dc_connecttick    connect timestamp (feeds the uptime field in replies)
