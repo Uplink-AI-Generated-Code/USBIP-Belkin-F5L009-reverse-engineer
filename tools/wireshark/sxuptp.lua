@@ -24,6 +24,14 @@ local PT_TCP, PT_UDP = 2, 3
 
 local sxuptp = Proto("sxuptp", "Silex SXUPTP (USB-over-IP)")
 
+-- Salc/resend heuristic state. The SXUPTP "Salc" watchdog re-sends an in-flight
+-- transfer record that stays unacked (~1000 ticks); on the wire that shows up as
+-- a data-channel message repeating a (direction, seq) we've already seen. We flag
+-- those as likely resends -- the behaviour that correlates with surviving the
+-- ~69s wedge. State is rebuilt from scratch on each load via sxuptp.init().
+local first_seen = {}   -- stream-key -> { seq -> first frame number }
+local dup_of     = {}   -- frame number -> { seq -> original frame number }
+
 ----------------------------------------------------------------------
 -- lookup tables
 ----------------------------------------------------------------------
@@ -97,6 +105,9 @@ f.j_name   = ProtoField.string("sxuptp.jcp.name", "JCP verb")
 f.j_rstat  = ProtoField.uint16("sxuptp.jcp.status", "Reply status", base.HEX)
 f.j_rlen   = ProtoField.uint16("sxuptp.jcp.len", "Reply length")
 f.j_body   = ProtoField.bytes ("sxuptp.jcp.body", "Body")
+-- Salc/resend heuristic (generated)
+f.resend    = ProtoField.bool    ("sxuptp.salc.resend", "SXUPTP resend (duplicate seq)")
+f.resend_of = ProtoField.framenum("sxuptp.salc.resend_of", "Resend of frame")
 -- identity reply decoded fields
 f.id_model = ProtoField.string("sxuptp.id.model", "Model")
 f.id_mac   = ProtoField.string("sxuptp.id.mac", "MAC")
@@ -106,10 +117,29 @@ f.id_usb   = ProtoField.string("sxuptp.id.usb", "Attached USB device")
 f.id_host  = ProtoField.string("sxuptp.id.host", "Hostname")
 f.id_fw    = ProtoField.string("sxuptp.id.firmware", "Firmware")
 
+-- expert info for the resend heuristic
+local e_resend = ProtoExpert.new("sxuptp.salc.resend.expert",
+  "SXUPTP likely resend (duplicate seq) -- Salc watchdog retransmit",
+  expert.group.SEQUENCE, expert.severity.NOTE)
+sxuptp.experts = { e_resend }
+
+-- clear heuristic state at the start of each capture load / reload
+function sxuptp.init()
+  first_seen = {}
+  dup_of = {}
+end
+
 ----------------------------------------------------------------------
 -- helpers
 ----------------------------------------------------------------------
 local function is_to_hub(pinfo) return pinfo.dst_port == SXUPTP_PORT end
+
+-- direction-specific stream key (request and its reply get different keys, so a
+-- normal request/reply pair sharing a seq is NOT flagged as a resend)
+local function stream_key(pinfo)
+  return tostring(pinfo.src) .. ":" .. pinfo.src_port .. ">" ..
+         tostring(pinfo.dst) .. ":" .. pinfo.dst_port
+end
 
 local function cstr(tvb, off)  -- NUL/printable-terminated ASCII at off
   local n = tvb:len()
@@ -188,6 +218,30 @@ local function dissect_data_msg(tvb, pinfo, tree, to_hub)
   sub:add(f.d_dir, tvb(0,0), to_hub and "host -> hub" or "hub -> host")
   sub:add(f.d_cat, tvb(1,1), t % 256)
   sub:add(f.d_seq, tvb(2,2))
+
+  -- Salc/resend heuristic: has this (direction, seq) been seen before?
+  local seq = tvb(2,2):uint()
+  if not pinfo.visited then
+    local key = stream_key(pinfo)
+    local store = first_seen[key]
+    if not store then store = {}; first_seen[key] = store end
+    local prev = store[seq]
+    if prev == nil then
+      store[seq] = pinfo.number
+    elseif prev ~= pinfo.number then
+      local fr = dup_of[pinfo.number]
+      if not fr then fr = {}; dup_of[pinfo.number] = fr end
+      fr[seq] = prev
+    end
+  end
+  local orig = dup_of[pinfo.number] and dup_of[pinfo.number][seq]
+  if orig then
+    sub:add(f.resend, true):set_generated()
+    sub:add(f.resend_of, orig):set_generated()
+    sub:append_text(string.format("  [RESEND of frame %d]", orig))
+    sub:add_proto_expert_info(e_resend, string.format("Resend of seq %d (first in frame %d)", seq, orig))
+    pinfo.cols.info:append(" [RESEND]")
+  end
 
   if not to_hub then                         -- 10-byte reply header + data
     sub:add(f.d_field0, tvb(4,2))            -- actually status slot; show both
