@@ -15,33 +15,32 @@ readback can tell three outcomes apart:
 All writes are confined to the **unformatted 2nd GPT partition** (auto-detected by
 reading the GPT off the device). The exFAT partition is never touched.
 
-## The open question these are meant to chase
+## ★ The open question — SOLVED (2026-10-13)
 
-Windows writes 128 MB to this hub reliably, with no reboot, *even right after the
-bridge "wedges" it*. That strongly suggests the problem is at least partly **on
-our side**, not dead hardware. The prime suspect baked into these tools:
+> The ~68–70 s "wedge" was the hub's **SXUP_ALC keepalive going unanswered.** The
+> hub pings UDP `client_ip:0xC15D` (49501) with `00 04 42 53` (`{len=4}{"BS"}`)
+> every ~10 s and the client MUST echo it; a missed echo lets the per-connection
+> "Salc" age reach ~5999 ticks (~69 s) and the hub sends `SXUP_ALC: Send RST!`.
+> The vendor echoes every ping (so it lives indefinitely); the bridge never bound
+> 49501, so it ICMP-rejected each ping and wedged at ~70 s. **Fix:** the Hub now
+> runs a `KeepaliveResponder` that echoes the ping. Verified live: a single
+> connection survives 600 s idle and a full-rate 128 MB write+verify (3.2 MB/s,
+> ALL MATCH), no reconnect. See `../../proprietary-Belkin-Silex/analysis/
+> F5L009_v1.2.0/tcp_connection_and_keepalive.md` (★ SOLVED) and
+> `idle_survival_test.py`.
 
-> **The production bridge builds its `SxuptpClient` with a hard-coded 3.0 s reply
-> timeout** (`bridge/usbip/backend.py`). A hub that stalls longer than 3 s while
-> committing to NAND (exactly when the drive's LED is thrashing) gets declared
-> "dropped" — and the re-enumeration that follows makes it worse. Windows'
-> mass-storage stack waits ~30 s. So some of my "the hub dropped" verdicts may
-> simply be **impatience**.
+The last hypothesis below turned out to be exactly right. The 3 s-timeout
+"impatience" theory was a red herring for the ~69 s wedge (it may still matter for
+genuinely slow NAND commits — `--timeout` remains the knob). For the record, the
+original suspicions were:
 
-Every script here takes `--timeout`. **The first experiment to run is the same
-sustained write at `--timeout 3` vs `--timeout 30` and see if the "drops"
-disappear.** If they do, the fix is in the bridge (raise/retry the timeout,
-tolerate a stall), not the hub.
-
-Other things worth a slow look:
-- Does a wedge correlate with a *stall* (long ACK) or a hard error? (Watch the
-  `[wstat]` trend from the committed `SXBULK_STATS=1` on the real bridge.)
-- Does cleanly closing + reopening the SXUPTP session between attempts behave
-  differently than our reboot-based recovery? (i.e. is our *recovery* the thing
-  leaving the hub in a bad state?)
-- Compare the bridge's on-the-wire SXUPTP traffic during a write against the
-  vendor capture in `../../Packet_Dumps/` — look for a periodic session
-  keep-alive/credit the bridge omits.
+- Was the ~69 s drop just the bridge's hard-coded 3 s reply timeout being too
+  impatient? (No — it was the missed keepalive; `--timeout` is unrelated.)
+- Does a wedge correlate with a *stall* or a hard error? (A clean RST at ~70 s,
+  no stall — the keepalive lease expiring.)
+- **Compare the bridge's SXUPTP traffic against the vendor capture — look for a
+  periodic session keep-alive the bridge omits.** ← this was the one: the `:49501`
+  `"BS"` keepalive.
 
 ## Setup
 
@@ -103,8 +102,10 @@ python3 sustain_test.py --mb 128 --wb 128 --timeout 30 --rd 2 --verify
   corrupted write on an already-struggling hub, not aliasing.
 - **The protocol code is correct** — attach, READ CAPACITY, READ(10), WRITE(10)
   are byte-exact when they complete.
-- **The wedge was non-deterministic** across my runs and independent of offset
-  and size — but I ran almost everything at the bridge's default 3 s timeout, so I
-  can't rule out that I was simply **timing out on a slow-but-alive hub**. That's
-  the hole these tools are built to let you probe. Given Windows' success, I'd now
-  bet real money the timeout/recovery behavior is a bigger factor than I credited.
+- **The ~69 s wedge is SOLVED** (see the top of this file): a missed `:0xC15D`
+  SXUP_ALC keepalive, now answered by the Hub's `KeepaliveResponder`. It was a
+  fixed per-connection lease, not non-determinism and not the 3 s timeout — a
+  full-rate 128 MB write+verify and 600 s idle now pass on a single connection.
+  (The earlier "non-deterministic / maybe impatience" read was before the
+  keepalive was found; the 3 s timeout can still matter for genuinely slow NAND,
+  but it was not the wedge.)
