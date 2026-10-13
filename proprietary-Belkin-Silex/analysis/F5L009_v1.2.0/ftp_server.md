@@ -141,20 +141,35 @@ and the `!FTPD:…` connection events. This is genuinely useful for the
 keepalive/wedge investigation in
 [`tcp_connection_and_keepalive.md`](tcp_connection_and_keepalive.md).
 
+**Captured.** A live pull from a host on the hub's LAN is saved next to this
+file as [`syslog_capture.txt`](syslog_capture.txt) (16 KB, 554 lines):
+
+```
+curl --user "anonymous:" ftp://192.168.2.3/syslog -o syslog_capture.txt
+```
+
+`anonymous` with an empty password logs in and `RETR syslog` succeeds even
+though `syslog` never appears in a `LIST` (it resolves by name only — see §2).
+The capture confirms this is a real network path to the `printf_log` ring: it
+runs from the PCI/USB boot enumeration through SXUPTP device bind/unbind,
+DHCP renewal, and the full `SXUP_ALC` lease lifecycle — `get salc` /
+`append to New Salc` on `SXUPTPD: Open(Req) … :19540(dev01)`, then
+`TCP:Recv RST 192.168.2.3:19540-…`, `remove from Old Salc`, `free salc`,
+`remove Salcq!` on teardown (the exact `Salc`/PortInfo state the
+keepalive/wedge work tracks). The log even records the capture itself:
+`FTPD:RETR(syslog) from 192.168.2.1`. No `Excepion`/`RESTART` records were
+present in this (clean) boot.
+
 > **Cross-reference / correction.** [`ram/symbols.txt`](ram/symbols.txt) and
 > the Tier-1 recon note previously concluded the printf ring buffer was *not*
 > reachable over the network (JCP `EXEC PRINT DIAGNOSTIC`/`CONFIGDATA` return an
 > empty ack; the web `loginfo.htm` is a separate app-level USB-event log).
 > `RETR syslog` on port 21 is a **distinct, previously-unnoticed network path**
-> to the system log. It should be captured and compared against the UART
-> console output to confirm whether it exposes the full `0x2f620c` ring (and
-> therefore `sa_age`/`Salc` lease state) without opening the hub.
->
-> **Not captured in this session:** the device lives on the LAN
-> (`192.168.2.3`); this analysis ran in a cloud container with no route to that
-> subnet, so `RETR syslog` timed out. Run the `get syslog` above on a host on
-> the hub's network and drop the capture next to this file (e.g.
-> `syslog_capture.txt`) to document the exact contents.
+> to the system log — now captured (see above). It exposes the `Salc` lease
+> state (`SXUP_ALC` / PortInfo transitions) without opening the hub, confirming
+> it is a usable, no-UART window onto the `printf_log` ring for the
+> keepalive/wedge investigation. A UART-vs-FTP comparison to confirm it is the
+> *full* `0x2f620c` ring is still open.
 
 ## 5. `flash` — firmware overwrite node (`VPFTPLDR`)
 

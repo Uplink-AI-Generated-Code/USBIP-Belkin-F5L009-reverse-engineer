@@ -1,0 +1,554 @@
+
+PCI: Vend ID 0x16C6
+PCI: Device ID 0x8695
+PCI: Revision ID 0x0000
+PCI: Base 06h, Sub 00h, PIF 00h
+PCI: BIST 00h
+PCI: Head Type 00h
+PCI: SubSystem Vend ID 0000h
+PCI: SubSystem ID 0000h
+PCI: MEM size 67108864
+PCI: MEM Addr 60000000
+PCI: id 0001, func 0000
+PCI: Vend ID 0x1033
+PCI: Device ID 0x0035
+PCI: Revision ID 0x0043
+PCI: Base 0Ch, Sub 03h, PIF 10h
+PCI: BIST 00h
+PCI: Head Type 80h
+PCI: SubSystem Vend ID 1033h
+PCI: SubSystem ID 0035h
+PCI: Device Name [PD720100A OHCI #1]
+PCI: MEM size 4096
+PCI: MEM Addr 64000000
+PCI: id 0001, func 0001
+PCI: Vend ID 0x1033
+PCI: Device ID 0x0035
+PCI: Revision ID 0x0043
+PCI: Base 0Ch, Sub 03h, PIF 10h
+PCI: BIST 00h
+PCI: Head Type 00h
+PCI: SubSystem Vend ID 1033h
+PCI: SubSystem ID 0035h
+PCI: Device Name [PD720100A OHCI #2]
+PCI: MEM size 4096
+PCI: MEM Addr 64001000
+PCI: id 0001, func 0002
+PCI: Vend ID 0x1033
+PCI: Device ID 0x00E0
+PCI: Revision ID 0x0004
+PCI: Base 0Ch, Sub 03h, PIF 20h
+PCI: BIST 00h
+PCI: Head Type 00h
+PCI: SubSystem Vend ID 1033h
+PCI: SubSystem ID 00E0h
+PCI: Device Name [PD720100A EHCI]
+PCI: MEM size 256
+PCI: MEM Addr 64002000
+PCI: Ireagal status
+PCI: Ireagal status
+PCI: Ireagal status
+PCI: Ireagal status
+PCI: Ireagal status
+PCI: Ireagal status
+PCI: Ireagal status
+PCI: Ireagal status
+PCI: Ireagal status
+PCI: Ireagal status
+PCI: Ireagal status
+PCI: Ireagal status
+PCI: Ireagal status
+PCI: Ireagal status
+PCI: Ireagal status
+PCI: Ireagal status
+PCI: Ireagal status
+PCI: Ireagal status
+PCI: Ireagal status
+PCI: Ireagal status
+PCI: Ireagal status
+PCI: Ireagal status
+PCI: Ireagal status
+PCI: Ireagal status
+03004000 00000204
+EEP:Stats[cnt1=00000003/cnt2=00000002]
+
+MAC address 00:1C:DF:11:CB:6D
+SYSLOG RE-START: 4
+VPORT LPORT 
+Bind PORT:
+[@prn]<@prn>
+[@null]<@null>
+[@syslog]<@syslog>
+[@flash]<@flash>
+
+Loader port init.
+***** NIC Initialize Start *****
+NIC:TxRx Stop
+NIC:MAC Reset
+NIC:Finish DMA Reset
+NIC: Initialize Start>>>
+NIC: CAM is Dsiable
+aNIC:PHY Mode...[00]<<
+bcdef..ghNIC:Interrupt Init
+NIC:Interrupt Start
+i.....<
+j<<OKTCP/IP:
+JCP_EXT: init <misp 39 template>
+JCP_EXT: JCP Name >> Network USB Hub
+USB init
+---- EHCI INIT ----
+EHCI NUM = 1
+EHCI: Base addr 64002000h
+EHCI: PD720100A Setup
+EHCI: Clock 30 MHz
+'EHCIDEB' EHCI Debugger Ver 0.0.1
+---- OHCI INIT ----
+OHCI NUM = 2
+OHCI: Base addr 64000000h
+OHCI: PD720100A Setup
+OHCI: Clock 30 MHz
+OHCI: Base addr 64001000h
+OHCI: PD720100A Setup
+OHCI: Clock 30 MHz
+'OHCIDEB' OHCI Debugger Ver 0.0.1
+'USBDEB' USB debugger Ver 2.0.0
+HUB: USB HUB INIT
+USBUPTP: USB SXUPTP INIT
+VP_SXUP: Create Port Name( dev01 )[004312E0].
+VP_SXUP: Create Port Name( dev02 )[004313D0].
+VP_SXUP: Create Port Name( dev03 )[004314C0].
+VP_SXUP: Create Port Name( dev04 )[004315B0].
+VP_SXUP: Create Port Name( dev05 )[004316A0].
+VP_SXUP: Create Port Name( dev06 )[00431790].
+VP_SXUP: Create Port Name( dev07 )[00431880].
+VP_SXUP: Create Port Name( dev08 )[00431970].
+VP_SXUP: Create Port Name( dev09 )[00431A60].
+VP_SXUP: Create Port Name( dev0A )[00431B50].
+VP_SXUP: Create Port Name( dev0B )[00431C40].
+VP_SXUP: Create Port Name( dev0C )[00431D30].
+VP_SXUP: Create Port Name( dev0D )[00431E20].
+VP_SXUP: Create Port Name( dev0E )[00431F10].
+VP_SXUP: Create Port Name( dev0F )[00432000].
+'SXUPDEB' SXUPTP debugger Ver 0.0.1
+NIC:Packet Task Start!!
+PHY:Initialize Start
+#PHY:PHY ID[86950001]:MICREL  KS8695P<
+PHY:PHY Setup...<
+PHY:Link Wait...PHY:10/100 Check START!!
+OHCI Task Start
+OHCI: Interrupt Setup...[0002]<
+USB: Get Device #1
+OHCI: PORT PowerON(00000100:64000054)
+EHCI Task Start
+EHCI: Start -----
+EHCI: Reset -----
+EHCI: Reset End -----
+EHCI: Interrupt Setup...[0004]<
+USB: Get Device #2
+EHCI: NotFound QH 0-0
+EHCI: PORT PowerON(00001000:64002064)
+VPAPRN: Out Task Start
+SOCK:Init [MAX:8]
+ACCEPT:Start
+ACCEPT: wait_nic_init...
+
+NIC:Polling Task Start!!
+PHY:TRC Task Start!!
+FLD: nic_wait_linkup...
+
+EHCI: PORT PowerON(00001000:64002068)
+OHCI: PORT PowerON(00000100:64000058)
+OHCI: PORT PowerON(00000100:6400005C)
+EHCI: PORT PowerON(00001000:6400206C)
+EHCI: PORT PowerON(00001000:64002070)
+OHCI: Interrupt Setup...[0003]<
+USB: Get Device #3
+OHCI: PORT PowerON(00000100:64001054)
+OHCI: PORT PowerON(00000100:64001058)
+EHCI: PORT PowerON(00001800:64002074)
+LEHCI Chk Task Start
+EHCI: PortChange  : 1
+EHCI: wPortStatus : 0000010100000001
+EHCI: wPortChange : 0000000000000001
+EHCI: Low Speed Devive [1]
+EHCI: PortChange  : 3
+EHCI: wPortStatus : 0000010100000001
+EHCI: wPortChange : 0000000000000001
+OHCI: PortChange  : 1
+OHCI: wPortStatus : 0000001100000001
+OHCI: wPortChange : 0000000000000001
+#NIC:PHY LinkStat [0x7FFF0000]
+TRC:100Base-TX [ 100Full]<
+OHCI: PortChange  : 1
+OHCI: wPortStatus : 0000001100000011
+OHCI: wPortChange : 0000000000010000
+EHCI: High Speed Device [3]
+EHCI: PortChange  : 3
+EHCI: wPortStatus : 0000010100000011
+EHCI: wPortChange : 0000000000010000
+USB: Get Device #4
+OHCI: Low Speed Device
+USB: Get Device #5
+EHCI: High Speed Device
+EHCI: NotFound QH 5-0
+EHCI: NotFound QH 5-0
+USB: Manufacturer - Corsair
+USB: Product - Voyager SliderX1
+USB: SerialNum - AALPK8GRLXFLWAX0
+EHCI: NotFound QH 5-1
+EHCI: NotFound QH 5-1
+EHCI: NotFound QH 5-2
+EHCI: NotFound QH 5-2
+USBUPTP: Get SXUPTP Device (0)
+VP_SXUP: Create tasks...
+
+VP_SXUP: bind sxuptp port(dev01)[004312E0]
+VP_SXUP: bind dev01 to spdev #5 [00432100]
+USBUPTP: bind I/F ifnum 0 / alts 0[0042FBB0]
+USBUPTP: DevInfo -> Corsair Voyager SliderX1 [H13]
+USBUPTP: find driver ifnum 0 / alts 0
+USB: Device is ready to be used!
+EHCI: PortChange  : 4
+EHCI: wPortStatus : 0000010100000001
+EHCI: wPortChange : 0000000000000001
+USB: Manufacturer - SONiX
+USB: Product - SI Gaming Keyboard
+USBUPTP: Get SXUPTP Device (1)
+VP_SXUP: Create tasks...
+
+VP_SXUP: bind sxuptp port(dev02)[004313D0]
+VP_SXUP: bind dev02 to spdev #4 [00432114]
+USBUPTP: bind I/F ifnum 0 / alts 0[0042FBEC]
+USBUPTP: DevInfo -> SONiX SI Gaming Keyboard [L21M0]
+USBUPTP: find driver ifnum 0 / alts 0
+USBUPTP: Get SXUPTP Device (2)
+VP_SXUP: Create tasks...
+
+VP_SXUP: bind sxuptp port(dev03)[004314C0]
+VP_SXUP: bind dev03 to spdev #4 [00432114]
+USBUPTP: bind I/F ifnum 1 / alts 0[0042FC28]
+USBUPTP: DevInfo -> SONiX SI Gaming Keyboard [L21M1]
+USBUPTP: find driver ifnum 1 / alts 0
+USB: Device is ready to be used!
+OHCI: Interrupt Task Start #4
+OHCI: Interrupt Task Start #4
+L<OK
+NIC:Loopback T Check Start!!
+NIC:CAM ID=1 ADDR=01:80:C2:00:00:00
+NIC:Loopback:NIC:TxRx Start
+NIC:Interrupt Start
+TEHCI: Full Speed Device [4]
+EHCI: PORT OWNER(00003802:64002070)
+USB: Don't Free Device #2-3
+EHCI: PortChange  : 4
+EHCI: wPortStatus : 0000000000000000
+EHCI: wPortChange : 0000000000010000
+EHCI: PortChange  : 5
+EHCI: wPortStatus : 0000010100000001
+EHCI: wPortChange : 0000000000000001
+OHCI: PortChange  : 2
+OHCI: wPortStatus : 0000000100000001
+OHCI: wPortChange : 0000000000000001
+OHCI: PortChange  : 2
+OHCI: wPortStatus : 0000000100000011
+OHCI: wPortChange : 0000000000010000
+EHCI: Full Speed Device [5]
+EHCI: PORT OWNER(00003802:64002074)
+USB: Don't Free Device #2-4
+EHCI: PortChange  : 5
+EHCI: wPortStatus : 0000000000000000
+EHCI: wPortChange : 0000000000010000
+USB: Get Device #6
+USB: Manufacturer - Prolific Technology Inc. 
+USB: Product - USB-Serial Controller D
+USBUPTP: Get SXUPTP Device (3)
+VP_SXUP: Create tasks...
+
+VP_SXUP: bind sxuptp port(dev04)[004315B0]
+VP_SXUP: bind dev04 to spdev #6 [00432128]
+USBUPTP: bind I/F ifnum 0 / alts 0[0042FC64]
+USBUPTP: DevInfo -> Prolific Technology Inc.  USB-Serial Controller D [F32]
+USBUPTP: find driver ifnum 0 / alts 0
+USB: Device is ready to be used!
+OHCI: PortChange  : 3
+OHCI: wPortStatus : 0000000100000001
+OHCI: wPortChange : 0000000000000001
+OHCI: Interrupt Task Start #6
+OHCI: PortChange  : 3
+OHCI: wPortStatus : 0000000100000011
+OHCI: wPortChange : 0000000000010000
+USB: Get Device #7
+USB: Manufacturer - FTDI
+USB: Product - USB Serial Converter
+USB: SerialNum - FTG4HWWN
+USBUPTP: Get SXUPTP Device (4)
+VP_SXUP: Create tasks...
+
+VP_SXUP: bind sxuptp port(dev05)[004316A0]
+VP_SXUP: bind dev05 to spdev #7 [0043213C]
+USBUPTP: bind I/F ifnum 0 / alts 0[0042FCA0]
+USBUPTP: DevInfo -> FTDI USB Serial Converter [F23]
+USBUPTP: find driver ifnum 0 / alts 0
+USB: Device is ready to be used!
+TTTTT#NIC:PHY LinkStat [0x3F1F0000]
+TRC:LINK Fail Detect...<
+TTTTTNIC: no bpdu.NIC:TxRx Stop
+NIC:Interrupt Stop
+[32:00]<OK
+NIC:CAM ID:1 removed
+NIC:TxRx Start
+NIC:Interrupt Start
+NIC: Release waiting tasks
+ACCEPT:Post msgs.
+ARP RECEIVE:Start
+IP RECEIVE:Start
+ARP TIMER:Start
+IP TIMER:Start
+TCPMAIN:Bind ICB 002F2260 to MACB 0039BB70(00:1C:DF:11:CB:6D)
+TCPMAIN:Sending DHCP/BOOTP request.
+DHCP:Discover.
+DHCP:Send request(R/T:2)
+DHCP:Wait recv(T/O:4000)
+DHCP:Send request(R/T:1)
+DHCP:Wait recv(T/O:4000)
+#NIC:PHY LinkStat [0x7FEF0000]
+TRC:100Base-TX [ 100Full]<
+#NIC:PHY LinkStat [0x3F0F0000]
+TRC:LINK Fail Detect...<
+DHCP:Send request(R/T:0)
+DHCP:Wait recv(T/O:4000)
+#NIC:PHY LinkStat [0x7FFF0000]
+TRC:100Base-TX [ 100Full]<
+DHCP:No reply for DISC.
+NIC: type_entry = { 0800 0806 8813 }
+TCPMAIN: IP:0.0.0.0 NetMask:0.0.0.0 GateWay:0.0.0.0
+No effective IP addr - Pending
+TCPMAIN:Enable IP-ARP
+TCPJOB (null)
+(syslog)
+(flash)
+IGMP 
+NIC:CAM ID=1 ADDR=01:00:5E:00:00:01
+All-Node Multicast ID=1
+JCPD 
+FTPD 
+HTTPD 
+TELNETD 
+RENDEZVOUS 
+NIC:CAM ID=2 ADDR=01:00:5E:00:00:FB
+IP-Join:224.0.0.251 id=2
+RDV:Init job=1 srv=8
+RDV:Service Added(_printer)
+RDV:Service Added(_http)
+UPNP 
+NIC:CAM ID=3 ADDR=01:00:5E:7F:FF:FA
+IP-Join:239.255.255.250 id=3
+UPNPD:UUID=1f4e6189-d241-3574-b800-15b49dd73f70
+WINSD 
+SXUPTPD 
+VPFTPLDR:Get 003C03C0 Used[ 00000000 / 001E0000 ]
+VPFTPLDR:Get 0040B800 Used[ 00000000 / 001E0000 ]
+VPFTPLDR:Get 00100800 Used[ 00100800 / 001E0000 ]
+VPFTPLDR:Get 0003C3C0 Used[ 0013CBC0 / 001E0000 ]
+VPFTPLDR:Get 00040800 Used[ 0017D3C0 / 001E0000 ]
+VPFTPLDR:Get 0000F3C0 Used[ 0018C780 / 001E0000 ]
+VPFTPLDR:Get 00007BC0 Used[ 00194340 / 001E0000 ]
+VPFTPLDR:Get 000012C0 Used[ 00195600 / 001E0000 ]
+
+10293776 byte heap memory used.
+ACCEPT:Listening Now
+TELNETD:Start
+RDV-MAIN:Start
+UPNPD:Start
+SXUP_ALC: Recv task start!
+TCPMAIN:Start
+RDV-SUB:Start
+IP:LinkLocal 169.254.199.35 established
+IP:address updated
+RDV:Callback event=4
+RDV:LinkChange IP = 169.254.199.35
+#NIC:PHY LinkStat [0x3F1F0000]
+TRC:LINK Fail Detect...<
+#NIC:PHY LinkStat [0x7FFF0000]
+TRC:100Base-TX [ 100Full]<
+DHCP:Disable IP-ARP
+TCPMAIN:Sending DHCP/BOOTP request.
+DHCP:Discover.
+DHCP:Send request(R/T:2)
+DHCP:Wait recv(T/O:4000)
+DHCP:Send request(R/T:1)
+DHCP:Wait recv(T/O:4000)
+DHCP:Reply from 192.168.2.1.
+DHCP:Request.
+DHCP:Send request(R/T:2)
+DHCP:Wait recv(T/O:4000)
+TCPMAIN:DHCP reply received.
+DHCP:Re-Discover IP Address:192.168.2.3
+DHCP:Disable LinkLocal
+IP:address updated
+RDV:Callback event=4
+DHCP:Lease=3600 Renew=1800 Rebind=3150
+RDV:LinkChange IP = 192.168.2.3
+JCPD: Recv EXEC SCANNER CONNECT
+SXUPTPD:Get job(00D4C430).
+SXUPTPD: Open(Req)[00D4C430] from 192.168.2.1:19540(dev01) with crypt(0).
+JCP: EXEC SCANNER CONNECT X[pos:0000 len:0003 total:0003]
+JCP: EXEC SCANNER CONNECT X[pos:0003 len:0000 total:0000]
+SXUPTPD:Open job[00D4C430/dev01].
+SXUPTPD:Open[00D4C430] from 192.168.2.1:-4679
+SXUP_ALC: get salc[00D56DD0]
+SXUP_ALC:	append to New Salc! [00D56DD0]<192.168.2.1> 
+SXUP_ALC:	PortInfo[00000000]
+SXUP_ALC:	      ->[00000001]
+VP_SXUP: [05]-[00] #0005 <SCS>(spkt).
+VP_SXUP: [05]-[00] #000B <SCS>(spkt).
+VP_SXUP: [05]-[00] #000C <SCS>(spkt).
+VP_SXUP: [05]-[00] #000D <SCS>(spkt).
+VP_SXUP: [05]-[00] #000E <SCS>(spkt).
+USB:[-setup-:0008] 
+00 09 01 00 00 00 00 00 
+EHCI: PortChange  : 2
+EHCI: wPortStatus : 0000000100000000
+EHCI: wPortChange : 0000000000000001
+USB: Don't Free Device #2-1
+EHCI: PortChange  : 2
+EHCI: wPortStatus : 0000010100000001
+EHCI: wPortChange : 0000000000000001
+EHCI: High Speed Device [2]
+EHCI: PortChange  : 2
+EHCI: wPortStatus : 0000010100000011
+EHCI: wPortChange : 0000000000010000
+USB: Get Device #8
+EHCI: High Speed Device
+EHCI: NotFound QH 8-0
+EHCI: NotFound QH 8-0
+USB: Manufacturer - Generic
+USB: Product - HD camera 
+USB: SerialNum - 20201212000000
+EHCI: NotFound QH 8-3
+EHCI: NotFound QH 8-3
+USBUPTP: Get SXUPTP Device (5)
+VP_SXUP: Create tasks...
+
+VP_SXUP: bind sxuptp port(dev06)[00431790]
+VP_SXUP: bind dev06 to spdev #8 [00432150]
+USBUPTP: bind I/F ifnum 0 / alts 0[0042FCDC]
+USBUPTP: DevInfo -> Generic HD camera  [H12M0]
+USBUPTP: find driver ifnum 0 / alts 0
+USBUPTP: Get SXUPTP Device (6)
+VP_SXUP: Create tasks...
+
+VP_SXUP: bind sxuptp port(dev07)[00431880]
+VP_SXUP: bind dev07 to spdev #8 [00432150]
+USBUPTP: bind I/F ifnum 1 / alts 0[0042FD18]
+USBUPTP: DevInfo -> Generic HD camera  [H12M1]
+USBUPTP: find driver ifnum 1 / alts 0
+USB: Device is ready to be used!
+-> port[00000002]
+	PE[00001001]
+EHCI: Interrupt Frame 2, uFrame 0
+EHCI: Interrupt Task Start #8
+	PO/PP[00003801]
+USB: Interrupt Task Delete
+VP_SXUP: unbind dev06 from spdev #8 [00432150]
+VP_SXUP: unbind<free port>(dev06)[00431790]
+VP_SXUP: Delete tasks...
+
+VP_SXUP: unbind sxuptp port(dev06)[00431790]
+USBUPTP: Free SXUPTP Device
+VP_SXUP: unbind dev07 from spdev #8 [00432150]
+VP_SXUP: spdev[00432150] is now free
+VP_SXUP: unbind<free port>(dev07)[00431880]
+VP_SXUP: Delete tasks...
+
+VP_SXUP: unbind sxuptp port(dev07)[00431880]
+USBUPTP: Free SXUPTP Device
+USB: Free device #8
+OHCI: PortChange  : 1
+OHCI: wPortStatus : 0000000100000001
+OHCI: wPortChange : 0000000000000001
+OHCI: PortChange  : 1
+OHCI: wPortStatus : 0000000100000011
+OHCI: wPortChange : 0000000000010000
+USB: Get Device #8
+USB: Manufacturer - Generic
+USB: Product - HD camera 
+USB: SerialNum - 20201212000000
+USBUPTP: Get SXUPTP Device (5)
+VP_SXUP: Create tasks...
+
+VP_SXUP: bind sxuptp port(dev06)[00431790]
+VP_SXUP: bind dev06 to spdev #8 [00432164]
+USBUPTP: bind I/F ifnum 0 / alts 0[0042FCDC]
+USBUPTP: DevInfo -> Generic HD camera  [F31M0]
+USBUPTP: find driver ifnum 0 / alts 0
+USBUPTP: Get SXUPTP Device (6)
+VP_SXUP: Create tasks...
+
+VP_SXUP: bind sxuptp port(dev07)[00431880]
+VP_SXUP: bind dev07 to spdev #8 [00432164]
+USBUPTP: bind I/F ifnum 1 / alts 0[0042FD18]
+USBUPTP: DevInfo -> Generic HD camera  [F31M1]
+USBUPTP: find driver ifnum 1 / alts 0
+USB: Device is ready to be used!
+OHCI: Interrupt Task Start #8
+VPORT:Open:0001
+FTPD:RETR(syslog) from 192.168.2.1
+VPORT:Open:0002
+FTPD:RETR(syslog) from 192.168.2.1
+FTPD-PASV:Already open
+FTPD:Connection broken from 192.168.2.1
+FTPD-PASV:Already open
+FTPD:Connection broken from 192.168.2.1
+TCP:Recv RST 192.168.2.3:19540-192.168.2.1:60857
+JCPD: Recv EXEC SCANNER DISCONNECT
+SXUPTPD: Close(Req)[00D4C430] from 192.168.2.1(dev01).
+JCP: EXEC SCANNER DISCONNECT X[pos:0000 len:0003 total:0003]
+SXUP_ALC:	remove from Old Salc [00D56DD0]<192.168.2.1>
+SXUP_ALC:	PortInfo[00000001]
+SXUP_ALC:	      ->[00000000]
+SXUP_ALC: free salc[00D56DD0]
+SXUP_ALC:	remove Salcq! [00D56DD0]<192.168.2.1>
+SXUPTPD:Close Connection from 192.168.2.1:-4679
+SXUPTPD:Close job[00D4C430]
+VP_SXUP: unbind dev01 from spdev #5 [00432100]
+VP_SXUP: spdev[00432100] is now free
+SXUPTPD: Cancel[00D4C430](dev01).
+VP_SXUP: Delete tasks...
+
+VP_SXUP: unbind sxuptp port(dev01)[004312E0]
+USBUPTP: Free SXUPTP Device
+USB: Port Reset Hub[2]-[3], Dev[5]
+SXUPTP:Free job.
+EHCI: High Speed Device [3]
+EHCI: PortChange  : 3
+EHCI: wPortStatus : 0000010100000011
+EHCI: wPortChange : 0000000000010000
+USB: Free device #5
+USB: Get Device #5
+EHCI: High Speed Device
+EHCI: NotFound QH 5-0
+EHCI: NotFound QH 5-0
+USB: Manufacturer - Corsair
+USB: Product - Voyager SliderX1
+USB: SerialNum - AALPK8GRLXFLWAX0
+EHCI: NotFound QH 5-1
+EHCI: NotFound QH 5-1
+EHCI: NotFound QH 5-2
+EHCI: NotFound QH 5-2
+USBUPTP: Get SXUPTP Device (0)
+VP_SXUP: Create tasks...
+
+VP_SXUP: bind sxuptp port(dev01)[004312E0]
+VP_SXUP: bind dev01 to spdev #5 [00432178]
+USBUPTP: bind I/F ifnum 0 / alts 0[0042FBB0]
+USBUPTP: DevInfo -> Corsair Voyager SliderX1 [H13]
+USBUPTP: find driver ifnum 0 / alts 0
+USB: Device is ready to be used!
+DHCP:Renew address=192.168.2.3 server=192.168.2.1 T/O=1350
+DHCP:Renewal.
+DHCP:Send request(R/T:2)
+DHCP:Wait recv(T/O:4000)
+DHCP:Lease=3600 Renew=1651 Rebind=3001
+VPORT:Open:0003
+FTPD:RETR(syslog) from 192.168.2.1
