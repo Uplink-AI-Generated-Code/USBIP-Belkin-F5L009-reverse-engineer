@@ -21,9 +21,26 @@ were reverse-engineered in this repo — see
   - 10-byte transfer **replies** (status OK/FAIL, size, data).
   - USB mass-storage **BOT**: SCSI **CBW** (`USBC`) on bulk-OUT with the SCSI
     opcode named, and **CSW** (`USBS`) on bulk-IN replies with pass/fail status.
+- **Salc-resend heuristic** — flags a data-channel message that repeats a
+  `(direction, seq)` already seen on that stream, i.e. the SXUPTP "Salc" watchdog
+  re-sending an unacked transfer record. Adds generated fields
+  `sxuptp.salc.resend` / `sxuptp.salc.resend_of` and an expert **Note**. This is
+  the behaviour that correlates with surviving the ~69 s wedge (see the RE docs),
+  so it's worth watching vendor-vs-ours. A genuine resend rides a *new* TCP
+  segment (not a TCP-layer retransmission), so it reaches the dissector; the
+  key is direction-specific, so a normal request/reply pair that shares a seq is
+  **not** flagged.
 
 Direction (request vs reply) is taken from the port direction, so capture both
 halves of the conversation.
+
+## Coloring rules
+
+`sxuptp.colorfilters` makes the wedge and SXUPTP traffic pop in the packet list:
+RST on 19540 (**red** — the wedge), Salc resend (**amber**), transfer/CSW FAIL
+(**pink**), identify (**blue**), CBW/CSW (**green**), control SETUP (**yellow**),
+other SXUPTP (**grey**). Load via **View ▸ Coloring Rules ▸ Import…**. It
+references `sxuptp.*` fields, so load the dissector first.
 
 ## Install
 
