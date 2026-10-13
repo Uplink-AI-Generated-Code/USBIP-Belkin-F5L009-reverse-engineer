@@ -119,16 +119,16 @@ class Device:
         self._ka_tag = 0xCAFE0000
         self._ka_n = 0
         self._ka_fail = 0
-        # Data-channel RECONNECT workaround (the reliable fix for the ~60-70s hub
-        # RST). The hub has a per-TCP-connection keepalive/RTO timer that RSTs a
-        # single long transfer at ~68s regardless of traffic (see
+        # RETIRED: data-channel RECONNECT workaround. The ~60-70s hub RST is now
+        # SOLVED and cured by answering the hub's SXUP_ALC keepalive (UDP :0xC15D,
+        # the Hub's KeepaliveResponder) -- the "root reset condition" we couldn't
+        # reproduce was simply the client echoing that keepalive. A single
+        # connection now lives indefinitely (verified: 600s quiet idle), so
+        # periodically tearing down and re-establishing the channel is no longer
+        # needed for liveness. reconnect() is kept only as a manual recovery path
+        # and stays OFF by default (SXMS_RECONNECT_SECS=0). See
         # proprietary-Belkin-Silex/analysis/F5L009_v1.2.0/
-        # tcp_connection_and_keepalive.md -- the root reset condition the vendor
-        # driver uses could not be reproduced). A fresh connection has a fresh
-        # timer, so we transparently re-establish the SXUPTP data channel every
-        # SXMS_RECONNECT_SECS seconds, at a Bulk-Only-Transport boundary (right
-        # after a CSW). Proven: 256MB written through 3 reconnects, no wedge.
-        # 0 = off (default). Use e.g. 50 (comfortably under ~68s).
+        # tcp_connection_and_keepalive.md (★ SOLVED section).
         self._reconnect_secs = float(os.environ.get("SXMS_RECONNECT_SECS", "0") or 0)
         self._reconnect_debug = bool(os.environ.get("SXMS_RECONNECT_DEBUG"))
         self._reconnect_last = 0.0
@@ -141,6 +141,8 @@ class Device:
         address, not the devNN index); `exclude` skips handles already bound to
         other busids with the same VID:PID. Returns the populated UsbipDevice."""
         c = SxuptpClient(self.host)
+        if self.hub is not None:
+            c._ka_enabled = False       # the Hub owns the one host-level keepalive responder
         if self._lock is not None:
             self._lock.acquire()
         try:
@@ -321,6 +323,8 @@ class Device:
             return None
         node = self.siblings[iface]
         sc = SxuptpClient(self.host)
+        if self.hub is not None:
+            sc._ka_enabled = False       # Hub owns the host-level keepalive responder
         if self._lock is not None:
             self._lock.acquire()
         try:

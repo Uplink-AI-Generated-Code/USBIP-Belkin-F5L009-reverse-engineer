@@ -12,12 +12,13 @@ descriptors, and then relays USBIP_CMD_SUBMIT/UNLINK as USB transfers.
 from __future__ import annotations
 
 import argparse
+import os
 import socket
 import socketserver
 import threading
 import time
 
-from ..sxuptp.client import SxuptpClient
+from ..sxuptp.client import KeepaliveResponder, SxuptpClient
 from . import protocol as u
 from .backend import Device
 
@@ -44,6 +45,16 @@ class Hub:
         self._session.bind((client_ip, 0))
         self._session.connect((host, 19540))
         self._session.settimeout(2.0)
+
+        # One host-level SXUP_ALC keepalive responder for the whole Hub: the hub
+        # runs a SINGLE keepalive stream per host (confirmed: one stream for two
+        # attached drives), so this is the sole responder — each device's own
+        # SxuptpClient keepalive is disabled under a Hub (backend sets
+        # _ka_enabled=False). Answering it is what cures the ~69s data-channel
+        # wedge. Disable the whole thing with SXUPTP_NO_KEEPALIVE.
+        self.keepalive = KeepaliveResponder(host, client_ip)
+        if os.environ.get("SXUPTP_NO_KEEPALIVE") is None:
+            self.keepalive.start()
 
         devs = SxuptpClient.discover(target=host)
         if not devs:
@@ -72,6 +83,24 @@ class Hub:
                                          siblings=siblings, hub=self)
         self.names = {busid: d["device"] for busid, d in zip(self.devices, listed)}
         self._node_busid = {d.node: b for b, d in self.devices.items()}
+
+    @property
+    def ka_echoed(self) -> int:
+        return self.keepalive.echoed
+
+    def close(self) -> None:
+        """Stop the keepalive responder and close the Hub's shared sockets."""
+        try:
+            self.keepalive.stop()
+        except Exception:
+            pass
+        for s in (getattr(self, "_grant", None), getattr(self, "_session", None)):
+            if s is not None:
+                try:
+                    s.close()
+                except OSError:
+                    pass
+        self._grant = self._session = None
 
     def claim_node(self, node: str) -> None:
         """Mark a node as a composite secondary so its standalone busid refuses."""

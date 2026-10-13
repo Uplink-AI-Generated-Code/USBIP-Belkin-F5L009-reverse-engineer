@@ -198,8 +198,14 @@ def main():
         print("\n[idle] === %s ===" % verdict)
         print("[idle] client-observed survival: %.1fs  (%d ops, mode=%s, single connection, no reconnect)"
               % (survival, n, args.mode))
-        print("[idle] keepalive pings echoed: %d" % getattr(dev.client, "ka_echoed", 0))
+        # The Hub owns the one host-level keepalive responder (not dev.client).
+        print("[idle] keepalive pings echoed: %d"
+              % getattr(hub, "ka_echoed", getattr(dev.client, "ka_echoed", 0)))
         sx.detach(dev)
+        try:
+            hub.close()
+        except Exception:
+            pass
         print("[idle] detached")
 
     if not args.no_web_oracle:

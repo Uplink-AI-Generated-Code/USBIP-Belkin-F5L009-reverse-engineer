@@ -20,6 +20,79 @@ import time
 from . import protocol as p
 
 
+class KeepaliveResponder:
+    """Answers the hub's SXUP_ALC keepalive. The hub runs a dedicated task (fn
+    @0x308464) bound to UDP 0xC15D and pings every client at client_ip:0xC15D with
+    "\\x00\\x04BS" ({len=4}{"BS"}) ~every 10s; the client must echo it, or the
+    Salc age reaches ~5999 ticks (~69s) and the hub RSTs the data channel
+    ('SXUP_ALC: Send RST!'). We echo each ping back to its source.
+
+    0xC15D is a FIXED firmware constant (the salc [+8] signature / keepalive port),
+    NOT negotiated or per-device: the hub runs ONE keepalive stream for the whole
+    host regardless of how many devices are attached. So a single responder per
+    client_ip suffices (this is why the Hub owns one, not each SxuptpClient). The
+    bind must use this exact port to receive the ping. SO_REUSEPORT lets a stray
+    per-client responder coexist harmlessly. Disable via SXUPTP_NO_KEEPALIVE.
+    """
+    PORT = 0xC15D          # 49501
+    PING = b"\x00\x04BS"
+
+    def __init__(self, host: str, client_ip: str):
+        self.host = host
+        self.client_ip = client_ip
+        self.echoed = 0
+        self._sock: socket.socket | None = None
+        self._thread = None
+        self._stop = threading.Event()
+
+    def start(self) -> bool:
+        if self._sock is not None:
+            return True
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+        except (AttributeError, OSError):
+            pass
+        try:
+            s.bind((self.client_ip, self.PORT))
+        except OSError:
+            s.close()
+            return False
+        s.settimeout(0.5)
+        self._sock = s
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._loop, name="sxuptp-keepalive",
+                                        daemon=True)
+        self._thread.start()
+        return True
+
+    def _loop(self) -> None:
+        s = self._sock
+        while s is not None and not self._stop.is_set():
+            try:
+                d, a = s.recvfrom(256)
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            if a[0] == self.host and d[:4] == self.PING:
+                try:
+                    s.sendto(d, a)      # echo verbatim back to the ping's source
+                    self.echoed += 1
+                except OSError:
+                    pass
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._sock is not None:
+            try:
+                self._sock.close()
+            except OSError:
+                pass
+            self._sock = None
+
+
 class SxuptpClient:
     def __init__(self, host: str, port: int = p.PORT, timeout: float = 3.0):
         self.host = host
@@ -30,13 +103,10 @@ class SxuptpClient:
         # enumeration so bulk headers carry the real MPS (0x8000|mps). Falls back
         # to 512 (correct high-speed bulk) for any endpoint not listed.
         self.ep_mps: dict[int, int] = {}
-        # SXUP_ALC keepalive responder (see _start_keepalive): the hub pings
-        # client_ip:49501 every ~10s and the client MUST echo it, else the Salc
-        # age reaches ~5999 ticks (~69s) and the hub RSTs the data channel.
-        self._ka_sock: socket.socket | None = None
-        self._ka_thread = None
-        self._ka_stop = threading.Event()
-        self.ka_echoed = 0
+        # SXUP_ALC keepalive responder (see KeepaliveResponder). Standalone
+        # SxuptpClient users get their own; under a Hub it is disabled
+        # (self._ka_enabled=False) because the Hub owns one host-level responder.
+        self._ka: KeepaliveResponder | None = None
         self._ka_enabled = os.environ.get("SXUPTP_NO_KEEPALIVE") is None
 
     # --- discovery (UDP 19540) ------------------------------------------
@@ -301,67 +371,23 @@ class SxuptpClient:
                 except OSError:
                     pass
 
-    # SXUP_ALC keepalive: the hub runs a dedicated task (fn @0x308464) bound to
-    # UDP 0xC15D and pings every client at client_ip:0xC15D with "\x00\x04BS"
-    # ({len=4}{"BS"}) every ~10s, expecting the client to echo it. A missed echo
-    # lets the Salc age climb to ~5999 ticks (~69s) and the hub sends
-    # 'SXUP_ALC: Send RST!' on the data channel. The vendor answers every ping (so
-    # one connection lives indefinitely); so do we. CONFIRMED by Packet_Dumps:
-    # vendor echoes -> survives 192s+, we didn't -> wedged at ~70s.
-    #
-    # 0xC15D is a FIXED firmware constant (the salc [+8] signature / keepalive
-    # port), NOT negotiated or per-device: one keepalive stream serves the whole
-    # host whether 1 or 2 devices are attached, and the hub pings it even for a
-    # client that never advertised it. So we must bind this exact port to receive
-    # the ping; the echo simply goes back to wherever the ping came from.
-    _KA_PORT = 0xC15D          # 49501
-    _KA_PING = b"\x00\x04BS"
+    @property
+    def ka_echoed(self) -> int:
+        return self._ka.echoed if self._ka is not None else 0
 
     def _start_keepalive(self) -> None:
-        if not self._ka_enabled or self._ka_sock is not None:
+        # Under a Hub, _ka_enabled is False: the Hub owns the single host-level
+        # KeepaliveResponder (the hub keeps ONE keepalive stream per host). A
+        # standalone SxuptpClient starts its own.
+        if not self._ka_enabled or self._ka is not None:
             return
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        try:
-            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)  # share across devices
-        except (AttributeError, OSError):
-            pass
-        try:
-            s.bind((self._client_ip, self._KA_PORT))
-        except OSError:
-            s.close()           # another responder on this host already holds it
-            return
-        s.settimeout(0.5)
-        self._ka_sock = s
-        self._ka_stop.clear()
-        self._ka_thread = threading.Thread(target=self._ka_loop,
-                                           name="sxuptp-keepalive", daemon=True)
-        self._ka_thread.start()
-
-    def _ka_loop(self) -> None:
-        s = self._ka_sock
-        while s is not None and not self._ka_stop.is_set():
-            try:
-                d, a = s.recvfrom(256)
-            except socket.timeout:
-                continue
-            except OSError:
-                break
-            if a[0] == self.host and d[:4] == self._KA_PING:
-                try:
-                    s.sendto(d, a)      # echo verbatim back to the ping's source
-                    self.ka_echoed += 1
-                except OSError:
-                    pass
+        self._ka = KeepaliveResponder(self.host, self._client_ip)
+        self._ka.start()
 
     def _stop_keepalive(self) -> None:
-        self._ka_stop.set()
-        if self._ka_sock is not None:
-            try:
-                self._ka_sock.close()
-            except OSError:
-                pass
-            self._ka_sock = None
+        if self._ka is not None:
+            self._ka.stop()
+            self._ka = None
 
     def reconnect(self, window: float = 5.0) -> int | None:
         """Re-establish the SXUPTP data channel as a NEW job, to reset the hub's
@@ -561,11 +587,15 @@ class SxuptpClient:
     # field is 16-bit, so this is the largest 512-multiple that fits.
     _BULK_CHUNK = 0xFE00   # 65024 = 127 * 512
 
-    # A small default pause after each bulk-OUT chunk holds sustained mass-storage
-    # writes below the rate at which this old hub/flash NAKs and wedges; 0.005
-    # wrote 32 MB cleanly in testing, and it adds only one pause per 64 KB
-    # (negligible for ordinary writes). Tunable via SXBULK_PACE (seconds); 0 = off.
-    _bulk_pace = float(os.environ.get("SXBULK_PACE", "0.005") or 0)
+    # Inter-chunk pace after each bulk-OUT chunk. DEFAULT 0 (no pacing) -- we do
+    # not throttle by default: the vendor doesn't, and the ~69s wedge is cured by
+    # the SXUP_ALC keepalive (KeepaliveResponder), not by slowing writes (the old
+    # "pacing keeps RTT samples flowing / cache from filling" rationale was from
+    # the refuted traffic-shape theories). The reactive resend-on-NAK loop above
+    # still rides out a transient flash-flush stall. If a specific device still
+    # NAK-storms under full-rate sustained writes, set SXBULK_PACE (seconds) or use
+    # SXBULK_ADAPT=1 for device-driven pacing. Tunable via SXBULK_PACE; 0 = off.
+    _bulk_pace = float(os.environ.get("SXBULK_PACE", "0") or 0)
     # On a bulk-OUT the hub rejects (device write-cache briefly full), pause and
     # resend the same chunk (the hub delivers a chunk all-or-nothing, so a resend
     # never duplicates bytes), backing off up to 1s, until this window elapses.
