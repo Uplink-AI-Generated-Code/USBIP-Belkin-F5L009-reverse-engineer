@@ -142,9 +142,21 @@ data channel — this is the long-standing ~69 s wedge.
 
 CONFIRMED live: the vendor echoes every ping and lives indefinitely; a client that
 doesn't bind 49501 ICMP-rejects each ping and wedges at ~70 s. `SxuptpClient` now
-runs a responder (`_start_keepalive()`, daemon thread on `client_ip:49501`,
-SO_REUSEPORT) — with it ON a single idle connection survived 150 s, with it OFF it
-wedged at 70 s. See
+runs a responder (`_start_keepalive()`, daemon thread on `client_ip:0xC15D`,
+SO_REUSEPORT) that echoes each ping back to its source — with it ON a single idle
+connection survived 150 s (and 600 s quiet), with it OFF it wedged at 70 s.
+
+**The port is a FIXED firmware constant (`0xC15D`), not negotiated or per-device.**
+The hub runs a dedicated keepalive task (`sxuptp_keepalive_task` @`0x308464`) bound
+to UDP `0xC15D` (socket global `0x2f0240`); it pings every client at
+`client_ip:0xC15D`. `0xc15d` appears in the firmware only as a constant literal
+(`0xffffc15d`, the `salc [+8]` signature), never derived from the connect — and
+the hub pings a client that never advertised it. It is **host-level**, not
+per-connection: `Packet_Dumps/2 flash drives idle.pcapng` shows a *single*
+keepalive stream (one ping/echo per ~10 s) for two attached drives. So the client
+must bind this exact port to receive the ping; one responder per host suffices
+(SO_REUSEPORT lets multiple device clients coexist, any one echo satisfies the hub).
+See
 [`../proprietary-Belkin-Silex/analysis/F5L009_v1.2.0/tcp_connection_and_keepalive.md`]
 (★ SOLVED section) and `diagnostics/direct-sxuptp/idle_survival_test.py`.
 

@@ -76,6 +76,7 @@
 0x003159b0  tcp_consume_job_event       # return [conn+0x16] (job-event); if [conn+0x128] bit15 set, wait/consume via 0x33493c first
 0x0031a044  tcp_abort_close             # active close/abort: set close flag 0x20000 in [conn+0x128], dispatch on TCP state via 0x318cc8 (-> FIN/RST), arm timer type5. r1=0,r2=-1 from conn_close
 0x0030817c  sxuptp_data_pump            # job allocator/dispatcher (get_tick -> [job+0x10] create time); not a per-conn active pump
+0x00308464  sxuptp_keepalive_task       # dedicated SXUP_ALC keepalive task: recv/echo "00 04 BS" (len=4, tag 0x4253) on UDP port 0xC15D (socket global @0x2f0240); pings every client at client_ip:0xC15D ~10s and expects an echo (a miss -> Salc age hits 5999 -> 'Send RST!'). Port is a fixed constant (0xffffc15d literal / salc[+8] signature), host-level not per-device.
 0x003040a8  sxuptp_announce_opcode      # returns the UDP announcement opcode by conn state [job+0x9c]: state 1 -> 0x2908 (device-attach announce), state 2 -> 0x29eb. Pushed to the client after EXEC SCANNER CONNECT; payload = flag,[devId],server IP, USB device desc @+0x40, config desc @+0x80 (multibyte BIG-endian)
 
 # --- SXUPTP "Salc" allocation/transfer-record manager (0x308000 region) ------
