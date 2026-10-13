@@ -124,12 +124,26 @@ which frees the hub slot (no reboot needed), so you can re-attach immediately.
 
 ## Verified with a real Linux kernel
 
-A stock Linux `usbip` client **attached `1-1` and mounted the flash drive**: the
-kernel enumerated it at high speed (Corsair Voyager, serial `AALPK8GRLXFLWAX0`),
-usb-storage bound it as `/dev/sda`, the GPT/exFAT partition `sda1` was read, it
-mounted read-only, and files were read back. A 4 MB read ran at ~2.6 MB/s with no
-I/O errors or resets. Control, bulk IN/OUT, device-speed, and clean slot release
-are all exercised by this path.
+A stock Linux `usbip` client exercises the whole chain
+(`vhci_hcd → USB/IP 3240 → bridge → SXUPTP 19540 → F5L009 → USB`). Re-verified
+end-to-end 2026-10-13 with the current server (Hub-owned SXUP_ALC keepalive, **no
+reconnect, no message pacing**):
+
+- All 5 hub devices **exported** and listed (`1-1` Corsair flash, `1-2`/`1-3`
+  SONiX keyboard nodes, `1-4` PL2303, `1-5` FTDI).
+- **Attach `1-1`** → the kernel enumerated it at high speed
+  (`1b1c:1a15`, "Voyager SliderX1", serial `AALPK8GRLXFLWAX0`); `usb-storage`
+  bound it as `/dev/sda` (128 GB, partitions `sda1`/`sda2`).
+- **Real bulk I/O:** a 16 MB read ran at ~2.8 MB/s with **zero I/O errors or
+  resets** (consistent md5); the exFAT `sda1` also mounts read-only and files
+  read back.
+- **Clean lifecycle:** detach → **immediate re-attach with no reboot** (the RST
+  close frees the hub slot) → detach, all clean.
+
+Control, bulk IN/OUT, device-speed negotiation, and slot release are all
+exercised. The data channel stays up on the keepalive alone — no periodic
+reconnect — so sustained transfers no longer hit the old ~69 s wedge
+(see [`../SXUPTP_PROTOCOL.md`](../SXUPTP_PROTOCOL.md) and the analysis docs).
 
 ### No Linux box? Use Docker (how the above was verified)
 
