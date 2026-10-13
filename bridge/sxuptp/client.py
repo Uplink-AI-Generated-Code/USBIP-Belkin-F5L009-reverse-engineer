@@ -301,13 +301,20 @@ class SxuptpClient:
                 except OSError:
                     pass
 
-    # SXUP_ALC keepalive: the hub pings UDP client_ip:49501 (= 0xC15D) with
-    # "\x00\x04BS" every ~10s and expects the client to echo it verbatim to
-    # host:49501. A missed echo lets the Salc age climb to ~5999 ticks (~69s) and
-    # the hub sends 'SXUP_ALC: Send RST!' on the data channel. The vendor answers
-    # every ping (so one connection lives indefinitely); so do we. CONFIRMED by
-    # Packet_Dumps: vendor echoes -> survives 192s+, we didn't -> wedged at ~70s.
-    _KA_PORT = 49501
+    # SXUP_ALC keepalive: the hub runs a dedicated task (fn @0x308464) bound to
+    # UDP 0xC15D and pings every client at client_ip:0xC15D with "\x00\x04BS"
+    # ({len=4}{"BS"}) every ~10s, expecting the client to echo it. A missed echo
+    # lets the Salc age climb to ~5999 ticks (~69s) and the hub sends
+    # 'SXUP_ALC: Send RST!' on the data channel. The vendor answers every ping (so
+    # one connection lives indefinitely); so do we. CONFIRMED by Packet_Dumps:
+    # vendor echoes -> survives 192s+, we didn't -> wedged at ~70s.
+    #
+    # 0xC15D is a FIXED firmware constant (the salc [+8] signature / keepalive
+    # port), NOT negotiated or per-device: one keepalive stream serves the whole
+    # host whether 1 or 2 devices are attached, and the hub pings it even for a
+    # client that never advertised it. So we must bind this exact port to receive
+    # the ping; the echo simply goes back to wherever the ping came from.
+    _KA_PORT = 0xC15D          # 49501
     _KA_PING = b"\x00\x04BS"
 
     def _start_keepalive(self) -> None:
@@ -342,7 +349,7 @@ class SxuptpClient:
                 break
             if a[0] == self.host and d[:4] == self._KA_PING:
                 try:
-                    s.sendto(d, (self.host, self._KA_PORT))   # echo verbatim
+                    s.sendto(d, a)      # echo verbatim back to the ping's source
                     self.ka_echoed += 1
                 except OSError:
                     pass
