@@ -30,6 +30,14 @@ class SxuptpClient:
         # enumeration so bulk headers carry the real MPS (0x8000|mps). Falls back
         # to 512 (correct high-speed bulk) for any endpoint not listed.
         self.ep_mps: dict[int, int] = {}
+        # SXUP_ALC keepalive responder (see _start_keepalive): the hub pings
+        # client_ip:49501 every ~10s and the client MUST echo it, else the Salc
+        # age reaches ~5999 ticks (~69s) and the hub RSTs the data channel.
+        self._ka_sock: socket.socket | None = None
+        self._ka_thread = None
+        self._ka_stop = threading.Event()
+        self.ka_echoed = 0
+        self._ka_enabled = os.environ.get("SXUPTP_NO_KEEPALIVE") is None
 
     # --- discovery (UDP 19540) ------------------------------------------
     @staticmethod
@@ -239,6 +247,7 @@ class SxuptpClient:
                 # By now the announcement has been buffered on the grant socket
                 # during the match; a non-blocking drain reliably captures it.
                 self._capture_announce()
+                self._start_keepalive()    # answer the hub's :49501 Salc pings
                 return self.dev_id
             except (ConnectionResetError, ConnectionAbortedError, OSError):
                 s.close()
@@ -291,6 +300,61 @@ class SxuptpClient:
                     s.settimeout(to)
                 except OSError:
                     pass
+
+    # SXUP_ALC keepalive: the hub pings UDP client_ip:49501 (= 0xC15D) with
+    # "\x00\x04BS" every ~10s and expects the client to echo it verbatim to
+    # host:49501. A missed echo lets the Salc age climb to ~5999 ticks (~69s) and
+    # the hub sends 'SXUP_ALC: Send RST!' on the data channel. The vendor answers
+    # every ping (so one connection lives indefinitely); so do we. CONFIRMED by
+    # Packet_Dumps: vendor echoes -> survives 192s+, we didn't -> wedged at ~70s.
+    _KA_PORT = 49501
+    _KA_PING = b"\x00\x04BS"
+
+    def _start_keepalive(self) -> None:
+        if not self._ka_enabled or self._ka_sock is not None:
+            return
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)  # share across devices
+        except (AttributeError, OSError):
+            pass
+        try:
+            s.bind((self._client_ip, self._KA_PORT))
+        except OSError:
+            s.close()           # another responder on this host already holds it
+            return
+        s.settimeout(0.5)
+        self._ka_sock = s
+        self._ka_stop.clear()
+        self._ka_thread = threading.Thread(target=self._ka_loop,
+                                           name="sxuptp-keepalive", daemon=True)
+        self._ka_thread.start()
+
+    def _ka_loop(self) -> None:
+        s = self._ka_sock
+        while s is not None and not self._ka_stop.is_set():
+            try:
+                d, a = s.recvfrom(256)
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            if a[0] == self.host and d[:4] == self._KA_PING:
+                try:
+                    s.sendto(d, (self.host, self._KA_PORT))   # echo verbatim
+                    self.ka_echoed += 1
+                except OSError:
+                    pass
+
+    def _stop_keepalive(self) -> None:
+        self._ka_stop.set()
+        if self._ka_sock is not None:
+            try:
+                self._ka_sock.close()
+            except OSError:
+                pass
+            self._ka_sock = None
 
     def reconnect(self, window: float = 5.0) -> int | None:
         """Re-establish the SXUPTP data channel as a NEW job, to reset the hub's
@@ -350,6 +414,7 @@ class SxuptpClient:
                 s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
                 self.tcp = s
                 self._capture_announce()   # announcement is buffered by now
+                self._start_keepalive()
                 return self.dev_id
             except (ConnectionResetError, ConnectionAbortedError, OSError):
                 s.close()
@@ -724,6 +789,7 @@ class SxuptpClient:
         self.close()
 
     def close(self) -> None:
+        self._stop_keepalive()
         if self.tcp:
             try:
                 # abortive close -> RST, so the hub frees the job (see disconnect)

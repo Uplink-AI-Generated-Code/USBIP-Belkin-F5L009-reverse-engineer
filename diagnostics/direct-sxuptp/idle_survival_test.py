@@ -151,7 +151,12 @@ def main():
     ap.add_argument("--max", type=float, default=240.0, help="give up after N s (survived)")
     ap.add_argument("--timeout", type=float, default=10.0, help="SXUPTP reply timeout s")
     ap.add_argument("--no-web-oracle", action="store_true", help="skip loginfo.htm cross-check")
+    ap.add_argument("--no-keepalive", action="store_true",
+                    help="disable the SXUP_ALC :49501 keepalive responder (expect ~70s wedge)")
     args = ap.parse_args()
+
+    if args.no_keepalive:
+        os.environ["SXUPTP_NO_KEEPALIVE"] = "1"   # read by SxuptpClient at attach
 
     period = 1.0 / args.hz if args.hz > 0 else 1.0
     print("[idle] attaching %s on %s (mode=%s hz=%s) ..."
@@ -161,6 +166,8 @@ def main():
     if ann:
         print("[idle] devId=%s (from 0x2908 announce) vid:pid=%04x:%04x"
               % (dev.client.dev_id, ann.get("vid", 0), ann.get("pid", 0)))
+    print("[idle] SXUP_ALC keepalive responder: %s"
+          % ("OFF (--no-keepalive)" if args.no_keepalive else "ON (echoing :49501 pings)"))
 
     t0 = time.time()
     wedged = False
@@ -191,6 +198,7 @@ def main():
         print("\n[idle] === %s ===" % verdict)
         print("[idle] client-observed survival: %.1fs  (%d ops, mode=%s, single connection, no reconnect)"
               % (survival, n, args.mode))
+        print("[idle] keepalive pings echoed: %d" % getattr(dev.client, "ka_echoed", 0))
         sx.detach(dev)
         print("[idle] detached")
 
