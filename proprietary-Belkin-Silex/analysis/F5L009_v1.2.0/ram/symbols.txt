@@ -38,13 +38,36 @@
 0x002fa5d0  jcp_identify_handler    # cmd4/0x9506 discovery/identity reply
 
 # --- SXUPTP (USB-over-IP transport, port 19540) ----------------------------
+# Job struct stride 0xe8; job[4]=FSM state, job[0xc]=TCP conn ptr, job[0x20]=USB
+# device ctx, job[0x3c]/[0x40]=ring ptrs, job[0x10]=create tick, [devctx+0xd0]=
+# connect tick (both for status/uptime reporting, NOT a watchdog).
+#
+# TEARDOWN / RST PATH (traced 2026-10-13): the data-channel RST is emitted by
+#   sxuptp_conn_close -> tcp_abort_close (0x31a044)
+# and conn_close has exactly ONE caller: the FSM teardown state (state 3) at
+# 0x30313c. The FSM (table @0x37b6d4, states 0..4; 3=teardown, 4=ACTIVE) reaches
+# state 3 REACTIVELY, when the socket recv tcp_sock_recv (0x316b24) returns
+# negative (0x302fee / 0x303028). The ACTIVE handler (0x30300a) has NO get_tick /
+# lease check -- there is no independent job-level ~69s watchdog. So the wedge is
+# whatever makes recv go negative. recv returns negative on: the close/abort flag
+# in [conn+0x128] (-0x23), a non-ESTABLISHED state {5,6,7} (-0x39), or a socket
+# error (0x315864). It also consumes a job-event via 0x3159b0 ([conn+0x16]) and
+# branches specifically on events 5 & 6 -- and event 6 is what the TCP per-tick
+# [conn+0x100] expiry posts via tcp_signal_job_event (0x31945c). [conn+0x100] is
+# the current prime suspect for the 69s trigger, BUT it is multi-purpose (also
+# written in the tcp_output/retransmit path @0x3175a0/0x317314), so its role as a
+# fixed establishment-armed countdown is NOT yet proven. OPEN: pin [conn+0x100]'s
+# arm value + whether data/retransmit activity re-arms it (vendor vs us).
 0x002fa478  jcp_scanner_connect_parse   # parse EXEC SCANNER CONNECT body
 0x00302c58  sxuptp_scanner_open         # create job for CONNECT (state 1)
-0x00302948  sxuptp_tcp_accept_match     # match accepted TCP conn to OPEN_WAIT job -> state 4
+0x00302948  sxuptp_tcp_accept_match     # match accepted TCP conn to OPEN_WAIT job (job[4] 2->4 ACTIVE); records connect tick @[devctx+0xd0], clears [job+0xe4], sets [job+0xc]=conn, starts pump
 0x00302924  sxuptp_free_job             # "Free job": zero job[0]/0x50/0xe4 (releases the slot)
-0x00302a44  sxuptp_conn_close           # close data-channel socket (RST/FIN), "Close job"
-0x00302fb0  sxuptp_conn_state_machine   # jump table on job[4]; state 3 -> teardown+free
-0x0030817c  sxuptp_data_pump            # data-channel pump started at job-active
+0x00302a44  sxuptp_conn_close           # "Close job": memset job+0x28, if job+0xc(conn): tcp_abort_close(conn,-1) (0x31a044) + conn_free (0x3190c8) [or graceful 0x318e00 when job+0xe0!=0]; frees job+0x44 buffer. ONLY caller: FSM state-3 @0x30313c
+0x00302fb0  sxuptp_conn_state_machine   # per-job FSM, jump table @0x37b6d4 on job[4]: 0 idle,1 connect-pending,2 OPEN_WAIT,3 teardown(->conn_close+free_job),4 ACTIVE(recv via 0x316b24 + pump). recv<0 -> job[4]=3
+0x00316b24  tcp_sock_recv               # socket recv on the data channel; returns <0 on close/abort (flag in [conn+0x128]) / non-ESTAB state / sockerr. Consumes job-event [conn+0x16] via 0x3159b0, branches on event==5/6
+0x003159b0  tcp_consume_job_event       # return [conn+0x16] (job-event); if [conn+0x128] bit15 set, wait/consume via 0x33493c first
+0x0031a044  tcp_abort_close             # active close/abort: set close flag 0x20000 in [conn+0x128], dispatch on TCP state via 0x318cc8 (-> FIN/RST), arm timer type5. r1=0,r2=-1 from conn_close
+0x0030817c  sxuptp_data_pump            # job allocator/dispatcher (get_tick -> [job+0x10] create time); not a per-conn active pump
 0x0030481c  sxuptp_tcp_msg_parser       # parse 24-byte data-channel header; dispatch by category
 0x003041e0  sxuptp_dispatch_pending_xfers  # process pending transfers; sb==2 -> intr-in queue read (0x304574)
 0x00303c70  sxuptp_build_msg_record     # ~0x40-byte outbound record

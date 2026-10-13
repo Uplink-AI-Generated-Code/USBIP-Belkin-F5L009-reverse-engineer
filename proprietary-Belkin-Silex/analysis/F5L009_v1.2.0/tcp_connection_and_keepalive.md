@@ -11,6 +11,50 @@ below the SXUPTPD *job* state machine already noted in
 (`sxuptp_conn_state_machine` @0x302fb0, job state at `job[4]`). The two layers are
 distinct: the SXUPTPD job FSM wraps this TCP connection FSM.
 
+## SXUPTP job layer — the teardown path (traced 2026-10-13)
+
+Having shown the RST is not an autonomous TCP timer, I traced the layer above.
+The data-channel RST is emitted here:
+
+```
+sxuptp_conn_close (0x302a44)              "Close job"
+   -> tcp_abort_close (0x31a044)          set close flag 0x20000 in [conn+0x128];
+                                          dispatch on TCP state (0x318cc8) -> FIN/RST
+   -> conn_free (0x3190c8)
+```
+
+`conn_close` has **exactly one caller**: the per-job FSM teardown state (state 3)
+at `0x30313c`. The FSM (`sxuptp_conn_state_machine 0x302fb0`, jump table
+`@0x37b6d4`, states 0..4: 1=connect-pending, 2=OPEN_WAIT, **3=teardown**,
+4=ACTIVE) reaches state 3 **reactively** — only when the data-channel socket recv
+`tcp_sock_recv (0x316b24)` returns negative (`0x302fee`, `0x303028`). **The ACTIVE
+handler has no `get_tick`/lease check — there is no independent job-level ~69 s
+watchdog.** (The timestamps that do exist — `[devctx+0xd0]` set at accept,
+`[job+0x10]` set at job-alloc — feed the status/uptime string in the discovery
+reply `sxuptp_encode_typed_fields`, and the OPEN_WAIT idle-timeout `[job+0xe4]` is
+*cleared* when the job goes ACTIVE. None is the active-transfer killer.)
+
+So the wedge reduces to: **what makes `tcp_sock_recv` return negative at ~69 s?**
+recv returns negative on (a) the close/abort flag in `[conn+0x128]` (ret −0x23),
+(b) a non-ESTABLISHED TCP state {5,6,7} (ret −0x39), or (c) a socket error
+(`0x315864`). It also consumes a job-event (`[conn+0x16]` via `0x3159b0`) and
+branches specifically on **events 5 and 6** — and **event 6 is exactly what the
+TCP per-tick `[conn+0x100]` expiry posts** via `tcp_signal_job_event`
+(`0x31945c` → `0x3159d0`). That is the one TCP→job notification that could drive
+the teardown without any peer action.
+
+**Open (the real remaining question), stated honestly:** `[conn+0x100]` is the
+prime suspect but is **multi-purpose** — it is also written in the
+`tcp_output`/retransmit path (`0x3175a0`, `0x317314`) with a computed value, and
+`tcp_sock_recv` *zeroes* it on its normal tail (`0x316d4e`). So it is not cleanly
+a fixed establishment-armed 69 s countdown, and I will not claim it is one until
+its arm value and re-arm conditions are pinned. Static RE keeps bottoming out on
+fields like this whose *live* values decide the outcome. Next step is most likely
+**dynamic**: watch `[conn+0x100]`/`[conn+0x16]`/`[conn+0x128]` on the live hub
+across a vendor transfer vs ours, or instrument the recv return code — rather than
+more static tracing. What *is* firmly established: the RST is the SXUPTP job
+teardown reacting to a negative recv, not a self-firing TCP timer.
+
 ## RETRACED 2026-10-13 — the wedge is NOT a TCP-layer timer
 
 > A full fresh trace of the state machine (tcp_set_state, tcp_arm_open_timer, the
