@@ -78,6 +78,15 @@ usbip attach -r <server-host> -b 1-1   # imports the device
   older than `_REPORT_FRESH` (keeping the newest). Replaying that history broke
   serial ports: a PL2303's old DCD on/off status flaps hang up a freshly opened
   `-clocal` tty.
+- **Bulk replies can take seconds.** Under a sustained write a flash drive
+  pauses to flush its cache; the hub then holds the bulk-OUT reply for 2.5-6.6 s
+  (about one pause per 100 MB on the Corsair, every one succeeding). The old 3 s
+  reply timeout failed those writes mid-stream, which desynced Bulk-Only
+  Transport: CSW reads timed out, the kernel reset the device (`reset high-speed
+  USB device`) and the hub dropped it from its list until a reboot. Bulk transfers
+  now wait `SXBULK_TIMEOUT` (default 30 s, the same per-command limit Linux
+  usb-storage uses); control/attach keep the short timeout. Verified: 2.4 GB of
+  100 MB `pv` writes with no resets, checksum-verified after a remount.
 - **Serial testing with socat 1.8.** `socat …,b9600` leaves the port at **speed 0**
   (B0), so the driver drops DTR/RTS; over a null-modem cable that is the peer's
   DCD, which hangs up the peer's tty. Use `ispeed=9600,ospeed=9600` (add

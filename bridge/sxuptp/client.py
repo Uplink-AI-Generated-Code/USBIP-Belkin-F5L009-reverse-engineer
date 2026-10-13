@@ -561,7 +561,7 @@ class SxuptpClient:
         if not data:
             self.seq = (self.seq + 1) & 0xFFFF
             self.tcp.sendall(p.bulk_write(self.dev_id, ep_addr, data, seq=self.seq, mps=mps))
-            self.tcp.settimeout(self.timeout)
+            self.tcp.settimeout(self._bulk_timeout)
             status, _ = self._recv_reply()
             return status
         off = 0
@@ -579,9 +579,12 @@ class SxuptpClient:
                 self.seq = (self.seq + 1) & 0xFFFF
                 t0 = time.monotonic()
                 self.tcp.sendall(p.bulk_write(self.dev_id, ep_addr, chunk, seq=self.seq, mps=mps))
-                self.tcp.settimeout(self.timeout)
+                self.tcp.settimeout(self._bulk_timeout)
                 status, _ = self._recv_reply()
                 lat = time.monotonic() - t0          # how long the hub took to ACK
+                if self._bulk_stats and lat > 1.0:
+                    os.write(2, f"[bulk_out] slow ACK {lat:.2f}s status={status:#06x} "
+                                f"chunk={len(chunk)}\n".encode())
                 if status == p.STATUS_OK:
                     break
                 backpressure = True
@@ -608,6 +611,14 @@ class SxuptpClient:
     # USB packetization mid-stream (observed: 0xFFFF reset the device). The length
     # field is 16-bit, so this is the largest 512-multiple that fits.
     _BULK_CHUNK = 0xFE00   # 65024 = 127 * 512
+
+    # How long a bulk transfer may wait for the hub's reply. A flash drive under a
+    # sustained write pauses to flush its cache: measured 2.5-6.2 s ACKs (13 in
+    # 1.2 GB, all successful). The old 3 s default failed those writes mid-stream,
+    # desyncing Bulk-Only Transport -> CSW reads time out -> the kernel resets the
+    # device and the hub drops it. A real host just keeps retrying NAKs; Linux
+    # usb-storage allows a command 30 s, so match that. SXBULK_TIMEOUT overrides.
+    _bulk_timeout = float(os.environ.get("SXBULK_TIMEOUT", "30") or 30)
 
     # Inter-chunk pace after each bulk-OUT chunk. DEFAULT 0 (no pacing) -- we do
     # not throttle by default: the vendor doesn't, and the ~69s wedge is cured by
@@ -722,12 +733,12 @@ class SxuptpClient:
         mps = self.ep_mps.get(ep_addr, 512)
         out = b""
         remaining = length
-        deadline = time.monotonic() + max(self.timeout, 5.0)
+        deadline = time.monotonic() + self._bulk_timeout
         while remaining > 0:
             req = min(remaining, self._BULK_CHUNK)
             self.seq = (self.seq + 1) & 0xFFFF
             self.tcp.sendall(p.bulk_read(self.dev_id, ep_addr, req, seq=self.seq, mps=mps))
-            self.tcp.settimeout(self.timeout)
+            self.tcp.settimeout(self._bulk_timeout)
             status, data = self._recv_reply()
             if status != p.STATUS_OK:
                 return status, out
