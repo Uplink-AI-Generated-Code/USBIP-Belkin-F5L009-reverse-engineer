@@ -49,7 +49,10 @@ see [`bridge/usbip/CLIENT.md`](bridge/usbip/CLIENT.md) for the container recipe.
 | SONiX keyboard — media/consumer keys | **interrupt** on a 2nd node (ep82) | volume / mute / play / track keys |
 | FTDI + Prolific USB-serial | control + **bulk** (async) | bidirectional + sustained loopback |
 
-Isochronous (audio/webcam) is not implemented. Hard-won details that make it work:
+Isochronous IN (webcam) is plumbed through end to end — the kernel's `vhci_hcd`
+accepts the ISO URBs and the hub delivers camera data — but the hub only passes a
+fraction of the stream (see [`bridge/usbip/CLIENT.md`](bridge/usbip/CLIENT.md)), so
+video does not yet assemble into whole frames. Hard-won details that make it work:
 
 - **Attach handshake** — a two-step UDP `EXEC SCANNER CONNECT` then a race to
   match the brief TCP `OPEN_WAIT` window; the slot is freed by an **abortive RST**
@@ -77,7 +80,7 @@ bridge/
 ```
 
 See [`TODO.md`](TODO.md) for remaining work (device unplug → clean USB/IP
-disconnect, reservation-steal, isochronous).
+disconnect, reservation-steal, isochronous throughput).
 
 ## The firmware tooling
 

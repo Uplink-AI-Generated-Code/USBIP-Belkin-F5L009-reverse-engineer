@@ -795,6 +795,7 @@ class SxuptpClient:
         if self.tcp is None or self.dev_id is None:
             raise RuntimeError("not attached")
         mps = self.ep_mps.get(ep_addr, max(packet_lengths))
+        packet_lengths = [p.hub_isoc_len(n) for n in packet_lengths]   # see hub_isoc_len
         self.seq = (self.seq + 1) & 0xFFFF
         self.tcp.sendall(p.isoc_read(self.dev_id, ep_addr, packet_lengths,
                                      seq=self.seq, mps=mps, interval=interval))
@@ -1159,6 +1160,7 @@ class ChannelMux:
         `status` is non-zero only if the channel died)."""
         job = _IsocJob(urb, complete, len(lengths))
         mps = max(lengths) if lengths else 0
+        lengths = [p.hub_isoc_len(n) for n in lengths]     # see hub_isoc_len
         with self._lock:
             if self._err:
                 dead = True

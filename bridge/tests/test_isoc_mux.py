@@ -91,7 +91,9 @@ class IsocMuxTest(unittest.TestCase):
                          [1024, 1024, 1024])
         self.assertTrue(done.wait(2))
         self.assertEqual(out[0], (0, [(0, 4, b"aaaa"), (0, 0, b""), (0, 2, b"bb")]))
-        self.assertEqual(hub.requests[0][1], [1024, 1024, 1024])
+        # the hub is asked for 1023, not 1024 (it delivers nothing for exact
+        # multiples of 1024; see protocol.hub_isoc_len)
+        self.assertEqual(hub.requests[0][1], [1023, 1023, 1023])
         mux.close()
 
     def test_large_urb_is_chunked_and_reassembled_in_order(self):

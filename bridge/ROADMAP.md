@@ -60,8 +60,9 @@ interrupt / isochronous), and session ("job") lifecycle. See
 
 ## Risks / unknowns
 
-- Isochronous support (webcams/audio) is the hardest to get right and may come
-  last; bulk/interrupt (printers, storage, HID) should work earlier.
+- Isochronous IN is implemented end to end, but the hub only passes a fraction of
+  the stream (~70-80 KiB/s of sparse packets), so webcam video does not assemble;
+  isochronous OUT (audio) is not implemented.
 - Static RE may leave gaps that only a live capture resolves; if a device is
   available later, a short capture would validate/close them quickly.
 - Nothing is verified against hardware until milestone 7; no bricking risk on the

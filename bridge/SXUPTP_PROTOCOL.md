@@ -867,6 +867,18 @@ ones begin with a UVC payload header (`0c 8c <PTS> ...`).
   deliver data; the early empty replies were camera warm-up after `SET_INTERFACE`, not
   the packet size. Sequential 8-packet requests take ~20 ms each (~25 KB/s of 320x240
   YUY2), so sustained video needs several requests in flight.
+- **Per-packet length quirk** (`protocol.hub_isoc_len`): the hub accepts a packet
+  only if it fits `length mod 1024`. Exact multiples (1024, 2048, 3072) deliver
+  nothing, 1025 only tiny packets; 1023/2047/3071 deliver. The bridge asks for
+  `1024*ceil(L/1024) - 1` and clamps the result back to the kernel's packet size.
+- **Rate**: every request takes a flat ~20 ms to answer whatever its size, and the
+  `interval` field [12:14] has no measurable effect. With 5 kernel URBs in flight
+  (32 packets each) the stream tops out at ~70-80 KiB/s, mostly empty packets, with
+  the camera flagging errors (UVC BFH error bit) in 5-40% of payloads, at any frame
+  size/interval - so whole frames do not assemble. A lone 16-packet request at
+  L=3071 never got a reply (8 does; kernel-driven 19-packet chunks do), so large
+  requests are unreliable. Whether a faster isoc service exists (more requests in
+  flight, other header fields, the unknown [14:16]) is unresolved.
 - A malformed descriptor block (`len,off,0` order) jammed the channel; reboot via HTTP.
 - Not yet explored: isoc OUT (0x8004), sustained throughput/frame assembly,
   cancelling a pending request, the u16 at [14:16].

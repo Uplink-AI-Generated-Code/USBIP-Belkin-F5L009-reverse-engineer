@@ -167,8 +167,14 @@ minimal.)
 
 ## What to watch for
 
-1. **Isochronous is not implemented** (webcams/audio won't work). Mass storage
-   and HID (keyboards) use control/bulk/interrupt only, which are implemented.
+1. **Isochronous IN works at the protocol level but not yet as video.** ISO URBs
+   are served (verified against the real Linux `vhci_hcd`: 188 URBs, 0 failed, 0
+   packet errors, UVC payload headers intact), but the hub returns only ~70-80
+   KiB/s of sparse packets — whole frames never assemble, so a webcam will not
+   produce usable video. Isochronous OUT (audio playback) is not implemented and
+   fails with -EPIPE. The cause is the hub's isoc service model, not the USB/IP
+   layer; details in `SXUPTP_PROTOCOL.md` ("Isochronous IN"). Mass storage and HID
+   (keyboards) use control/bulk/interrupt only.
 2. **Multiple devices concurrently: VERIFIED working** (2026-10-13). The server
    shares one SXUPTP session socket and serializes *attaches*, but attached
    devices then run on independent data channels. A stress run imported four at

@@ -431,6 +431,8 @@ def _selftest() -> None:
                         "0000" "00000800"
                         "00000000" "00000400" "00000000"
                         "00000400" "00000400" "00000000"), ir.hex()
+    assert [hub_isoc_len(n) for n in (0, 1, 128, 1023, 1024, 1025, 2400, 3072)] == \
+        [0, 1023, 1023, 1023, 1023, 2047, 3071, 3071]
     # reply: golden shape from the live camera (count, table, then payload)
     body = (bytes.fromhex("0003") +
             bytes.fromhex("00000000" "00000004" "00000000") +
@@ -579,6 +581,22 @@ def isoc_read(dev_id: int, ep_addr: int, packet_lengths: list[int], seq: int = 0
         descs.append(struct.pack(">III", off, ln, 0))
         off += ln
     return hdr + b"".join(descs)
+
+
+def hub_isoc_len(length: int) -> int:
+    """The per-packet length to ask the hub for when a client wants `length`.
+
+    The hub accepts a packet only if it fits `length mod 1024`: an exact multiple
+    of 1024 (1024, 2048, 3072 ...) delivers nothing at all, and e.g. 1025 only
+    1-byte packets. Verified live with a UVC camera whose packets run up to
+    ~930 B: 1023/2047/3071 deliver, 1024/1025/2048/3072 return all-empty. So ask
+    for one byte under the next 1024 boundary, keeping the transaction count and
+    giving the last transaction its maximum room. The caller clamps results back
+    to the size it really has room for. (A device sending a FULL 1024-byte final
+    packet would lose a byte; none seen.)"""
+    if length <= 0:
+        return length
+    return ((length + 1023) // 1024) * 1024 - 1
 
 
 @dataclass

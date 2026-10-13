@@ -224,17 +224,22 @@ class Device:
             # every endpoint. `cut` marks the start of the 2nd interface (used only
             # for the single-interface fallback below).
             cut = len(full)
-            iface_idx = -1
+            iface_idx = 0
             i = 0
             while i + 1 < len(full):
                 blen, btype = full[i], full[i + 1]
                 if blen == 0:
                     break
-                if btype == 0x04:                            # INTERFACE descriptor
-                    iface_idx += 1
-                    if iface_idx == 1 and cut == len(full):
+                if btype == 0x04 and i + 8 < len(full):      # INTERFACE descriptor
+                    # Key on bInterfaceNumber, not on a running count of INTERFACE
+                    # descriptors: each ALTERNATE setting is another descriptor
+                    # (a webcam's streaming interface has several), and counting
+                    # them would number its endpoints past the sibling nodes.
+                    inum, alt = full[i + 2], full[i + 3]
+                    iface_idx = inum
+                    if inum >= 1 and cut == len(full):
                         cut = i                              # start of 2nd interface
-                    if i + 8 < len(full):
+                    if alt == 0:
                         interfaces.append((full[i + 5], full[i + 6], full[i + 7]))
                 elif btype == 0x05 and i + 6 < len(full):    # ENDPOINT descriptor
                     addr = full[i + 2]
