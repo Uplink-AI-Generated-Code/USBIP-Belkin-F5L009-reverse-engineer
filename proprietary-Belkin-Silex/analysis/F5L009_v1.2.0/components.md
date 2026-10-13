@@ -45,7 +45,7 @@ algorithmic sense.
 |---|---|---|
 | DHCP/BOOTP/RARP client | `!DHCP:*`, `?DHCP:*`, `!TCPMAIN:Sending RARP request.` | custom |
 | HTTP server | banner **`JC-HTTPD/1.16.22`**; `?HTTPD:`/`!HTTPD:Bad request %s`, `HTTP/1.1` | Silex "JC" HTTP server, versioned (not boa/GoAhead/appweb) |
-| FTP server | `215 silex FTP daemon.`, RFC959/RFC2428 subset | custom |
+| FTP server | `215 silex FTP daemon.`, RFC959/RFC2428 subset | custom (print-spooler + `syslog`/`flash` virtual FS — see [`ftp_server.md`](ftp_server.md)) |
 | Telnet server | `Copyright (C) 2007 Belkin International, Inc.` banner | config/status menu (see [`management_and_flash.md`]) |
 | UPnP | `silex-jp:device:NullDevice:1`, `UPnPNULL/1.0` | Silex's own — **not** Intel Portable SDK / libupnp / pupnp |
 | mDNS | mDNS config strings | custom — **no** mDNSResponder/Bonjour/dns-sd strings |

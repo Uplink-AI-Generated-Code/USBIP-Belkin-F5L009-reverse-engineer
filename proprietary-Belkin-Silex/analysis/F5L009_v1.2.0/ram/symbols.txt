@@ -143,6 +143,29 @@
 0x002f76f4  flash_sector_erase          # ~ sector erase loop ("%lx:Erase","Erase flash memory...")
 0x002f7b8c  flash_unlock_enable         # "unlock flash": set software write-enable interlock flag
 
+# --- FTP server (silex FTPD, port 21) — see ../ftp_server.md ----------------
+# Open login (root / empty PASS). Fronts a 3-node virtual FS, not real storage.
+0x0030a8d0  ftp_resolve_path            # (ftp_sess, path, &out_node): walk ONE path component -> node. '/'|'\' -> ftp_root_node; '.'/'..' -> self/parent([node+8]); else node_find_by_name, fallback node_find_or_default. cur dir = [ftp_sess+0xb8]. 8 callers (CWD/LIST/STOR/RETR/...)
+0x0030a9ac  ftp_format_list_perms       # build the "d---------" perm string for a node from its flags (bit 0x11 -> 'r', 0x22 -> 'w')
+0x0030aa0c  ftp_cmd_list                # LIST/NLST: resolve dir, emit "total 0", enumerate ftp_node_table, one ftp_format_list_perms line per node (all shown as 0-byte nobody:nobody @ Jan 1 1970)
+0x0030ad40  ftp_send_greeting           # assembles "220 Belkin Network USB Hub Ver 1.2.0 FTP server."
+0x0030b594  ftp_cmd_stru                # STRU: first char 'F' -> "200 Command Ok."; else "504 Not implemented."
+0x0030b5bc  ftp_cmd_stor                # STOR/STOU/APPE: resolve node, [node+8]==0 -> "550 Unknown printer", write-bit(0x20) clear -> "550 Permission denied"; else open data conn + spool as print job (type 3, spooler 0x32b4dc); logs "!FTPD:STOR(%s) from %SA"
+0x0030b690  ftp_cmd_retr                # RETR: resolve node, "550 Unknown printer"/"550 Permission denied" guards, open data conn, stream node contents; logs "!FTPD:RETR(%s) from %SA"
+0x0030f8b4  node_find_by_name           # search ftp_node_table by name (+optional id@+0xe). PRE-increments r4 by 0x18, so the head record ('null') is a sentinel never matched by name
+0x0030f93c  node_find_by_type           # search ftp_node_table by type([node+0x14]) and optional id([node+0xe])
+0x0030f978  node_find_or_default        # node_find_by_name; on miss return ftp_default_job ([0x2f1120])
+0x0030f9cc  node_set_default            # store ftp_default_job ([0x2f1120])
+0x002fb3a0  vpftpldr_init               # "VPFTPLDR" FTP firmware loader: alloc FTPLDRBUF, "Loader port init.", "VPFTPLDR:Get %lx Used[...]"; backs the 'flash' node / "Farmware overwrite" .VUP program path (see ../management_and_flash.md)
+# FTP virtual-FS node table — 0x18-byte records {+0:name, +4:"@"name, +8:parent, +0xc:flags, +0xe:id, +0x14:type}:
+0x0033a654  ftp_node_table              # head/sentinel 'null'(flags 0x30022, write-only discard, not name-resolvable); 'syslog'(0x30011 READ-ONLY -> RETR syslog streams the system log); 'flash'(0x20 WRITE -> firmware overwrite)
+0x0033a6b4  ftp_root_node               # "/" directory node (flags 0x30000); children enumerated from ftp_node_table
+0x002f1120  ftp_default_job             # current/default print-job node (0 when idle); fallback for unknown names -> "550 Unknown printer"
+# NOTE (re the Tier-1 claim above): `RETR syslog` on port 21 IS a network path
+# to the system log, distinct from JCP/loginfo.htm. Capture it on-LAN and diff
+# against the UART console to see whether it exposes the 0x2f620c printf ring
+# (and sa_age/Salc state) without opening the hub. See ../ftp_server.md §4.
+
 # --- Telnet (port 23) ------------------------------------------------------
 # login root / empty password; admin flag at telnet_session+0x14 gates privileged
 # items ("You must login as an administrator." @0x383eb0, check @0x32f65a).
