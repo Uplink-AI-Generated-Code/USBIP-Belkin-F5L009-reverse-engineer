@@ -864,6 +864,14 @@ class SxuptpClient:
             self._bc = None
 
 
+# USBIP_TRACE=1 also traces ChannelMux interrupt polls/replies (hub side).
+_MUX_TRACE = bool(os.environ.get("USBIP_TRACE"))
+
+
+def _mux_trace(line: str) -> None:
+    os.write(2, f"[mux   {time.monotonic():.4f}] {line}\n".encode())
+
+
 class ChannelMux:
     """Multiplex control + interrupt + bulk over ONE attached SXUPTP channel.
 
@@ -906,6 +914,16 @@ class ChannelMux:
         self._t = threading.Thread(target=self._reader, daemon=True)
         self._t.start()
 
+    # Banked interrupt reports older than this (seconds) are history, not the gap
+    # between a URB completing and the kernel resubmitting it; see enqueue().
+    _REPORT_FRESH = 0.25
+
+    def _trim_reports(self, rep: "collections.deque") -> None:
+        """Drop banked reports older than _REPORT_FRESH, always keeping the newest."""
+        stale = time.monotonic() - self._REPORT_FRESH
+        while len(rep) > 1 and rep[0][0] < stale:
+            rep.popleft()
+
     def register_intr(self, ep_addr: int, length: int, interval: int) -> None:
         self._ep_cfg[ep_addr] = (length or 8, interval or 10)
         self._pending[ep_addr] = collections.deque()
@@ -924,6 +942,8 @@ class ChannelMux:
         self._seq_ep[seq] = ep
         self.c.tcp.sendall(p.interrupt_read(self.c.dev_id, ep, length, interval, seq=seq))
         self._primed.add(ep)
+        if _MUX_TRACE:
+            _mux_trace(f"prime ep={ep:#x} seq={seq} pending={len(self._pending[ep])}")
 
     def _reprime_later(self, ep: int) -> None:
         """Re-issue the interrupt poll for `ep` after its bInterval, off the reader
@@ -949,8 +969,15 @@ class ChannelMux:
                 complete(urb, EREMOTEIO_, b"")
                 return
             rep = self._reports[ep]
+            # Reports banked while no URB was queued: keep the newest, and any
+            # recent enough to be the gap between a completion and the kernel's
+            # resubmit (HID typing). Older ones are history from while nobody
+            # was listening (e.g. a closed serial port) -- replaying it feeds
+            # the kernel stale state: a PL2303's old DCD on->off flaps hang up
+            # the freshly opened tty.
+            self._trim_reports(rep)
             if rep:
-                status, data = rep.popleft()
+                _t, status, data = rep.popleft()
                 cb = (urb, complete)
             else:
                 self._pending[ep].append((urb, complete))
@@ -1117,13 +1144,23 @@ class ChannelMux:
                     ep = self._seq_ep.pop(seq, None)
                     if ep is not None:                  # interrupt poll reply
                         self._primed.discard(ep)
+                        if _MUX_TRACE:
+                            _mux_trace(f"intr reply ep={ep:#x} seq={seq} st={status} "
+                                       f"data={data.hex()} pending={len(self._pending[ep])}")
                         if status == p.STATUS_OK and data:   # a real HID report
                             pend = self._pending[ep]
                             if pend:
                                 urb, complete = pend.popleft()
                                 done = (complete, urb, status, data)
                             else:
-                                self._reports[ep].append((status, data))
+                                rep = self._reports[ep]
+                                rep.append((time.monotonic(), status, data))
+                                self._trim_reports(rep)
+                            # Keep polling even with no URB queued: the hub itself
+                            # queues every report of an endpoint it has been asked
+                            # to read and hands the backlog out one per poll, so
+                            # pausing only moves the stale history into the hub.
+                            # enqueue() trims what we bank here.
                             self._prime(ep)             # keep one outstanding
                         else:
                             # No usable report: either an empty reply (endpoint idle)

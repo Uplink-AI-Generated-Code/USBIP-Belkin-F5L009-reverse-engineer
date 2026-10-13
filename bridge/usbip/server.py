@@ -25,6 +25,43 @@ from .backend import EPIPE, Device
 
 ECONNRESET = -104   # RET_UNLINK status for a URB cancelled while still pending
 
+# USBIP_TRACE=1: log every URB-phase CMD from the kernel and every RET we send,
+# per busid, with a monotonic timestamp and the first data bytes. Diagnostic only.
+_TRACE = bool(os.environ.get("USBIP_TRACE"))
+_T0 = time.monotonic()
+
+
+def _trace(busid: str, line: str) -> None:
+    os.write(2, f"[trace {time.monotonic() - _T0:9.4f} {busid}] {line}\n".encode())
+
+
+def _hexhead(data: bytes, n: int = 16) -> str:
+    return data[:n].hex() + ("…" if len(data) > n else "")
+
+
+class _TracingSocket:
+    """Wraps the client connection to log each RET_SUBMIT/RET_UNLINK sent."""
+
+    def __init__(self, sock, busid: str):
+        self._sock = sock
+        self._busid = busid
+
+    def __getattr__(self, name):
+        return getattr(self._sock, name)
+
+    def sendall(self, pkt: bytes) -> None:
+        if len(pkt) >= u.CMD_HDR_LEN:
+            import struct
+            command, seq, _devid, direction, ep, status, actual = \
+                struct.unpack_from(">IIIIIiI", pkt, 0)
+            if command == u.USBIP_RET_SUBMIT:
+                _trace(self._busid, f"RET_SUBMIT seq={seq} ep={ep} "
+                       f"{'IN ' if direction else 'OUT'} st={status} len={actual} "
+                       f"{_hexhead(pkt[u.CMD_HDR_LEN:])}")
+            elif command == u.USBIP_RET_UNLINK:
+                _trace(self._busid, f"RET_UNLINK seq={seq} st={status}")
+        self._sock.sendall(pkt)
+
 
 class Hub:
     """Inventory of exportable devices, discovered once at startup."""
@@ -211,6 +248,8 @@ class Hub:
 
 
 class Handler(socketserver.BaseRequestHandler):
+    _busid = "?"                     # set on import; labels USBIP_TRACE lines
+
     def _recvall(self, n: int) -> bytes:
         buf = b""
         while len(buf) < n:
@@ -259,6 +298,9 @@ class Handler(socketserver.BaseRequestHandler):
             self.request.sendall(u.pack_import_reply(info))
             print(f"[usbip] imported {busid} ({hub.names.get(busid)}) "
                   f"{info.id_vendor:04x}:{info.id_product:04x}")
+            if _TRACE:
+                self.request = _TracingSocket(self.request, busid)
+                self._busid = busid
             self._urb_loop(dev)
         finally:
             # always disconnect (idempotent), even if the client vanished before
@@ -322,6 +364,13 @@ class Handler(socketserver.BaseRequestHandler):
                         continue
                 except ConnectionError:
                     return
+                if _TRACE:
+                    _trace(self._busid, f"CMD_SUBMIT seq={cmd.seqnum} ep={cmd.ep} "
+                           f"{'IN ' if cmd.is_in else 'OUT'} len={cmd.transfer_buffer_length}"
+                           + (f" setup={cmd.setup.hex()}" if (cmd.ep & 0x0F) == 0 else "")
+                           + (f" data={_hexhead(cmd.transfer_buffer)}"
+                              if cmd.transfer_buffer else "")
+                           + (" async" if dev.is_async(cmd) else ""))
                 if dev.is_async(cmd):
                     # completed later, on the mux reader thread, when the reply lands
                     with self._send_lock:
@@ -340,6 +389,9 @@ class Handler(socketserver.BaseRequestHandler):
                 # completed gets RET_UNLINK(0). Holding _send_lock across the
                 # cancel orders us against _complete_async (lock order: _send_lock
                 # -> mux lock; the mux never calls back holding its own lock).
+                if _TRACE:
+                    _trace(self._busid, f"CMD_UNLINK seq={cmd.seqnum} "
+                           f"victim={cmd.unlink_seqnum}")
                 with self._send_lock:
                     victim = self._inflight.get(cmd.unlink_seqnum)
                     if victim is not None and not dev.cancel_async(victim):

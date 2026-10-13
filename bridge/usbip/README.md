@@ -71,6 +71,27 @@ usbip attach -r <server-host> -b 1-1   # imports the device
   VID:PID that also expose no usable discriminator could still be assigned in the
   wrong order, but serials differ in the device list (`L21M0`/`L21M1`) if finer
   matching is ever needed.
+- **The hub queues interrupt reports.** Once an interrupt-IN endpoint has been
+  read, the hub banks every report the device sends and hands the backlog out
+  one per poll. So `ChannelMux` keeps polling even when no URB is queued (else
+  the backlog just waits in the hub) and, on the next URB, drops banked reports
+  older than `_REPORT_FRESH` (keeping the newest). Replaying that history broke
+  serial ports: a PL2303's old DCD on/off status flaps hang up a freshly opened
+  `-clocal` tty.
+- **Serial testing with socat 1.8.** `socat …,b9600` leaves the port at **speed 0**
+  (B0), so the driver drops DTR/RTS; over a null-modem cable that is the peer's
+  DCD, which hangs up the peer's tty. Use `ispeed=9600,ospeed=9600` (add
+  `clocal=1` if the reader should ignore the peer's carrier altogether).
+
+## Debugging
+
+`USBIP_TRACE=1` logs to stderr every URB-phase command from the kernel and every
+reply we send (per busid, timestamped, first data bytes), plus `ChannelMux`
+interrupt polls and the hub's replies:
+
+```sh
+USBIP_TRACE=1 python3 -m bridge.usbip.server 192.168.2.3 --client-ip 192.168.2.50 2> trace.log
+```
 
 ## Next
 
