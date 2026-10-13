@@ -11,6 +11,34 @@ below the SXUPTPD *job* state machine already noted in
 (`sxuptp_conn_state_machine` @0x302fb0, job state at `job[4]`). The two layers are
 distinct: the SXUPTPD job FSM wraps this TCP connection FSM.
 
+## ★ SOLVED 2026-10-13 — the wedge is a missed UDP keepalive on :49501
+
+The ~69 s RST is the hub's **`SXUP_ALC` keepalive** going unanswered. The hub pings
+**UDP `client_ip:49501` (= `0xC15D`, the magic `salc_init` writes to `[salc+8]`)
+with the 4 bytes `00 04 42 53` (`{len=4}{"BS"}`) every ~10 s**, and the client is
+expected to **echo it verbatim** to `host:49501`. Each echo resets the Salc
+activity timer; a missed echo lets `sa_age` climb to 5999 ticks (~69 s) →
+`SXUP_ALC: Send RST!` → RST (the teardown path below).
+
+Proof (`Packet_Dumps`, UDP `:49501`, both ends on 49501):
+- **Vendor (.36):** echoes every ping (`00044253` back, ~1 ms later) → connection
+  lives indefinitely (idle 192 s, 1 GB 447 s).
+- **Us (.50), before the fix:** no socket on 49501 → ICMP port-unreachable to each
+  ping → wedge at ~70 s (7 missed pings × 10 s).
+
+**Fix (verified live, single connection, NO reconnect):** `SxuptpClient` now runs
+a keepalive responder that echoes the ping. A/B in one build —
+**keepalive ON: survived 150 s (`--max`), 15 pings echoed; OFF: wedged at 70 s,
+0 echoed** — event log agreeing both times. This **supersedes** the delayed-ACK /
+retransmit correlation (delaying TCP ACKs never made us echo the *UDP* keepalive,
+which is why the dnctl test still wedged) and the "what resets `sa_age`" question:
+the answer is the :49501 echo. The data-channel reconnect workaround is no longer
+needed for liveness. Repro: `diagnostics/direct-sxuptp/idle_survival_test.py`.
+
+Everything below remains accurate as the *teardown plumbing* the missed keepalive
+ultimately triggers; only the "what keeps the connection alive" question is now
+answered (the :49501 echo), not open.
+
 ## SXUPTP job layer — the teardown path (traced 2026-10-13)
 
 Having shown the RST is not an autonomous TCP timer, I traced the layer above.

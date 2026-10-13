@@ -131,6 +131,23 @@ resolves the USB device by name (`sub_00306D1C`), and sets job state **1**.
 This maps cleanly onto a USB/IP exporter: `usbip attach` → CONNECT + TCP + the
 device descriptors; URBs ⇄ SXUPTP type-1..4 messages; detach → DISCONNECT.
 
+### SXUP_ALC keepalive — UDP `:49501`, the data-channel liveness signal (SOLVED)
+
+The hub keeps a data-channel session alive by **pinging UDP `client_ip:49501`
+(= `0xC15D`) with the 4 bytes `00 04 42 53` (`{len=4}{"BS"}`, the `SXUP_ALC` tag)
+every ~10 s**; the client must **echo it verbatim** to `host:49501` (both ends use
+49501). Each echo resets the per-connection "Salc" age; miss ~7 in a row and the
+age hits ~5999 ticks (~69 s), the hub logs `SXUP_ALC: Send RST!` and RSTs the TCP
+data channel — this is the long-standing ~69 s wedge.
+
+CONFIRMED live: the vendor echoes every ping and lives indefinitely; a client that
+doesn't bind 49501 ICMP-rejects each ping and wedges at ~70 s. `SxuptpClient` now
+runs a responder (`_start_keepalive()`, daemon thread on `client_ip:49501`,
+SO_REUSEPORT) — with it ON a single idle connection survived 150 s, with it OFF it
+wedged at 70 s. See
+[`../proprietary-Belkin-Silex/analysis/F5L009_v1.2.0/tcp_connection_and_keepalive.md`]
+(★ SOLVED section) and `diagnostics/direct-sxuptp/idle_survival_test.py`.
+
 ### Device-attach announcement — JCP opcode `0x2908` (CONFIRMED on hardware)
 
 Right after `EXEC SCANNER CONNECT` (and its short `OK` reply), the hub **pushes an
