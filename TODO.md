@@ -15,17 +15,12 @@
    device was NOT actually held by another host, so no contention/steal protocol
    was exercised (the request just attached normally; no distinct packets seen).
    Needs a real scenario: device reserved by host A, then host B requests it.
-3. **exFAT-path early wedge (~160 KB)** — STILL OPEN, and now clearly DISTINCT
-   from the ~68s connection RST (which is SOLVED: it was the missed SXUP_ALC
-   keepalive on UDP :0xC15D, now answered by the Hub's KeepaliveResponder — see
-   tcp_connection_and_keepalive.md ★ SOLVED). A full-bridge write to the exFAT
-   partition drops very early (~160 KB), long before any connection-age limit.
-   Raw/large-sequential writes to the unformatted partition are fine (verified
-   full-rate, single connection, no reconnect: 128 MB write+verify at 3.2 MB/s,
-   and 600s idle — all past the old 68s wall on the keepalive alone). The exFAT
-   drop is on the metadata / scattered-small-write path — a separate early
-   hub-side drop, NOT the keepalive timer. NOT being worked yet — investigate
-   later (candidate: small-transfer cadence or FS-metadata interleave).
+3. **exFAT-path early wedge (~160 KB)** — RESOLVED (verified 2026-10-13). The
+   early drop no longer reproduces. Linux usbip kernel client (Arch container), exFAT
+   partition mounted read-write: ~8.3 MB written (40 files 8-316 KB + one 8 MB
+   file, ~50x past the old failure point), all 41 sha256 sums matched after a
+   full unmount/remount; a 400-small-file metadata stress (mkdir/cp/mv/rm) was
+   intact after remount. No dmesg errors, no resets, no read-only remount.
 
 ## Bridge follow-ups (lower priority)
 - Consumer/media keys (ep0x82): DONE and routed correctly. The hub delivers ep82
