@@ -141,10 +141,17 @@ age hits ~5999 ticks (~69 s), the hub logs `SXUP_ALC: Send RST!` and RSTs the TC
 data channel — this is the long-standing ~69 s wedge.
 
 CONFIRMED live: the vendor echoes every ping and lives indefinitely; a client that
-doesn't bind 49501 ICMP-rejects each ping and wedges at ~70 s. `SxuptpClient` now
-runs a responder (`_start_keepalive()`, daemon thread on `client_ip:0xC15D`,
-SO_REUSEPORT) that echoes each ping back to its source — with it ON a single idle
-connection survived 150 s (and 600 s quiet), with it OFF it wedged at 70 s.
+doesn't bind 49501 ICMP-rejects each ping and wedges at ~70 s. The bridge answers
+it with a `KeepaliveResponder` (daemon thread on `client_ip:0xC15D`, SO_REUSEPORT,
+echoes each ping to its source). Because the keepalive is host-level, the **Hub
+owns one** responder for all devices (each `SxuptpClient`'s own is disabled under a
+Hub; standalone clients start their own). With it ON a single idle connection
+survived 150 s (and 600 s quiet); with it OFF it wedged at 70 s.
+
+Because this cures the wedge, the old **data-channel reconnect workaround is
+retired** (kept only as a manual recovery path, OFF by default), and the bridge
+does **no message pacing by default** (`SXBULK_PACE=0`) — pacing was a crutch from
+the refuted traffic-shape theories, not a real requirement.
 
 **The port is a FIXED firmware constant (`0xC15D`), not negotiated or per-device.**
 The hub runs a dedicated keepalive task (`sxuptp_keepalive_task` @`0x308464`) bound
