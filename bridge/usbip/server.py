@@ -15,6 +15,7 @@ import argparse
 import os
 import socket
 import socketserver
+import sys
 import threading
 import time
 
@@ -37,25 +38,41 @@ class Hub:
         #   _session: ephemeral, connected to the hub — issues GET USB_DEVICE_LIST
         #             AND every CONNECT, so they share one source port (the hub
         #             keys the session to it).
-        self._grant = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self._grant.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self._grant.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-        self._grant.bind((client_ip, 19540))
-        self._session = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self._session.bind((client_ip, 0))
-        self._session.connect((host, 19540))
-        self._session.settimeout(2.0)
-
-        # One host-level SXUP_ALC keepalive responder for the whole Hub: the hub
-        # runs a SINGLE keepalive stream per host (confirmed: one stream for two
-        # attached drives), so this is the sole responder — each device's own
-        # SxuptpClient keepalive is disabled under a Hub (backend sets
-        # _ka_enabled=False). Answering it is what cures the ~69s data-channel
-        # wedge. Disable the whole thing with SXUPTP_NO_KEEPALIVE.
+        self._grant = self._session = None
         self.keepalive = KeepaliveResponder(host, client_ip)
-        if os.environ.get("SXUPTP_NO_KEEPALIVE") is None:
-            self.keepalive.start()
+        try:
+            self._grant = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self._grant.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self._grant.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            self._bind(self._grant, (client_ip, 19540))
+            self._session = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self._bind(self._session, (client_ip, 0))
+            self._session.connect((host, 19540))
+            self._session.settimeout(2.0)
 
+            # One host-level SXUP_ALC keepalive responder for the whole Hub: the
+            # hub runs a SINGLE keepalive stream per host (confirmed: one stream
+            # for two attached drives), so this is the sole responder — each
+            # device's own SxuptpClient keepalive is disabled under a Hub (backend
+            # sets _ka_enabled=False). Answering it is what cures the ~69s
+            # data-channel wedge, so failing to bind it is fatal. Disable it
+            # deliberately with SXUPTP_NO_KEEPALIVE.
+            if os.environ.get("SXUPTP_NO_KEEPALIVE") is None:
+                if not self.keepalive.start():
+                    raise OSError(f"keepalive responder: {self.keepalive.error}")
+            self._discover_devices(host, client_ip)
+        except BaseException:
+            self.close()
+            raise
+
+    @staticmethod
+    def _bind(sock: socket.socket, addr: tuple[str, int]) -> None:
+        try:
+            sock.bind(addr)
+        except OSError as e:
+            raise OSError(f"cannot bind UDP {addr[0]}:{addr[1]}: {e}") from e
+
+    def _discover_devices(self, host: str, client_ip: str) -> None:
         devs = SxuptpClient.discover(target=host)
         if not devs:
             raise RuntimeError(f"no SXUPTP hub answered discovery at {host}")
@@ -262,11 +279,21 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--port", type=int, default=3240)
     args = ap.parse_args(argv)
 
-    hub = Hub(args.host, args.client_ip)
+    try:
+        hub = Hub(args.host, args.client_ip)
+    except OSError as e:
+        print(f"[usbip] FATAL: not starting: {e}", file=sys.stderr)
+        return 1
     print(f"[usbip] hub {args.host} mac={hub.mac.hex()}; devices:")
     for busid, name in hub.names.items():
         print(f"         {busid}  {name}")
-    srv = Server((args.listen, args.port), Handler)
+    try:
+        srv = Server((args.listen, args.port), Handler)
+    except OSError as e:
+        print(f"[usbip] FATAL: cannot bind TCP {args.listen}:{args.port}: {e}",
+              file=sys.stderr)
+        hub.close()
+        return 1
     srv.hub = hub                          # type: ignore[attr-defined]
     print(f"[usbip] listening on {args.listen}:{args.port} "
           f"(usbip attach -r <host> -b 1-1)")

@@ -14,6 +14,7 @@ import queue
 import select
 import socket
 import struct
+import sys
 import threading
 import time
 
@@ -41,6 +42,7 @@ class KeepaliveResponder:
         self.host = host
         self.client_ip = client_ip
         self.echoed = 0
+        self.error: str | None = None     # why the responder is not running, if so
         self._sock: socket.socket | None = None
         self._thread = None
         self._stop = threading.Event()
@@ -56,9 +58,11 @@ class KeepaliveResponder:
             pass
         try:
             s.bind((self.client_ip, self.PORT))
-        except OSError:
+        except OSError as e:
             s.close()
+            self._fail(f"cannot bind {self.client_ip}:{self.PORT}: {e}")
             return False
+        self.error = None
         s.settimeout(0.5)
         self._sock = s
         self._stop.clear()
@@ -67,21 +71,39 @@ class KeepaliveResponder:
         self._thread.start()
         return True
 
+    def _fail(self, msg: str) -> None:
+        # Without the echo the hub RSTs every data channel after ~69s, so a dead
+        # responder must never be silent.
+        self.error = msg
+        print(f"[sxuptp] KEEPALIVE FAILED: {msg} -- the hub will reset data "
+              f"channels after ~69s", file=sys.stderr, flush=True)
+
+    @property
+    def running(self) -> bool:
+        return (self._sock is not None and self._thread is not None
+                and self._thread.is_alive())
+
     def _loop(self) -> None:
         s = self._sock
+        send_failing = False
         while s is not None and not self._stop.is_set():
             try:
                 d, a = s.recvfrom(256)
             except socket.timeout:
                 continue
-            except OSError:
+            except OSError as e:
+                if not self._stop.is_set():
+                    self._fail(f"receive loop died: {e}")
                 break
             if a[0] == self.host and d[:4] == self.PING:
                 try:
                     s.sendto(d, a)      # echo verbatim back to the ping's source
                     self.echoed += 1
-                except OSError:
-                    pass
+                    send_failing = False
+                except OSError as e:
+                    if not send_failing:    # report once per failure streak
+                        self._fail(f"echo to {a[0]}:{a[1]} failed: {e}")
+                        send_failing = True
 
     def stop(self) -> None:
         self._stop.set()
