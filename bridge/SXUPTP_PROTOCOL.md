@@ -131,6 +131,35 @@ resolves the USB device by name (`sub_00306D1C`), and sets job state **1**.
 This maps cleanly onto a USB/IP exporter: `usbip attach` → CONNECT + TCP + the
 device descriptors; URBs ⇄ SXUPTP type-1..4 messages; detach → DISCONNECT.
 
+### Device-attach announcement — JCP opcode `0x2908` (CONFIRMED on hardware)
+
+Right after `EXEC SCANNER CONNECT` (and its short `OK` reply), the hub **pushes an
+unsolicited UDP packet** to the client with first u16 = **`0x2908`** (previously
+"unknown"). It is the device-attach announcement: it carries the **devId** and the
+attached device's **USB descriptors**, which is how the client learns the devId
+and the device's endpoints. The firmware selects the opcode by connection state
+(`sxuptp_announce_opcode` @`0x3040a8`, reads `[job+0x9c]`): **state 1 → `0x2908`**,
+state 2 → **`0x29eb`** (a second announcement variant).
+
+Layout (1024-byte payload observed; multibyte fields are **big-endian** — the hub
+byte-swaps them, unlike raw USB little-endian):
+
+```
++0x00 u16  opcode            0x2908 (state 1) / 0x29eb (state 2)
++0x02 u8   flag              0x01
++0x03 u8   devId             the transfer handle used on the data channel
++0x04 u8[4]server IP         e.g. 192.168.2.3
++0x40 ...  USB device descriptor (18 bytes: bcdUSB, class, MPS0, idVendor,
+                               idProduct, bNumConfigurations, ... — all BE)
++0x80 ...  USB configuration descriptor (config → interface → endpoints;
+                               wTotalLength / wMaxPacketSize are BE)
+```
+
+Example (Corsair Voyager SliderX1): devId 5, VID:PID `0x1b1c:0x1a15`, interface
+class 0x08 (Mass Storage) / 0x06 (SCSI) / 0x50 (BOT), endpoints `0x01` OUT and
+`0x82` IN, both bulk 512. Decoded by the Wireshark dissector
+([`../tools/wireshark/sxuptp.lua`](../tools/wireshark/sxuptp.lua)).
+
 ### JCP — confirmed live against the device
 
 Request framing CONFIRMED on hardware: `{u16 command, u16 sub, "NAME\0"[, body]}`

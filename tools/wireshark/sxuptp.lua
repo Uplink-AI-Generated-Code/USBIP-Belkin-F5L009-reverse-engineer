@@ -108,6 +108,37 @@ f.j_body   = ProtoField.bytes ("sxuptp.jcp.body", "Body")
 -- Salc/resend heuristic (generated)
 f.resend    = ProtoField.bool    ("sxuptp.salc.resend", "SXUPTP resend (duplicate seq)")
 f.resend_of = ProtoField.framenum("sxuptp.salc.resend_of", "Resend of frame")
+-- JCP SCANNER CONNECT/DISCONNECT request body
+f.sc_flag  = ProtoField.uint8 ("sxuptp.scanner.flag", "Flag")
+f.sc_maclen= ProtoField.uint8 ("sxuptp.scanner.mac_len", "MAC length")
+f.sc_mac   = ProtoField.string("sxuptp.scanner.mac", "Device MAC")
+f.sc_ip    = ProtoField.string("sxuptp.scanner.client_ip", "Client IP")
+f.sc_port  = ProtoField.string("sxuptp.scanner.port", "Port name")
+-- device-attach announcement (0x2908 / 0x29eb)
+local AN_CODE = { [0x2908]="device-attach announce", [0x29eb]="announce (state 2)" }
+f.an_code  = ProtoField.uint16("sxuptp.announce.code", "Announce code", base.HEX, AN_CODE)
+f.an_flag  = ProtoField.uint8 ("sxuptp.announce.flag", "Flag", base.HEX)
+f.an_devid = ProtoField.uint8 ("sxuptp.announce.devid", "devId (USB address)", base.DEC)
+f.an_ip    = ProtoField.string("sxuptp.announce.server_ip", "Device-server IP")
+-- embedded USB descriptors (big-endian multibyte as the hub re-encodes them)
+f.dd_bcdusb= ProtoField.uint16("sxuptp.usb.bcdUSB", "bcdUSB", base.HEX)
+f.dd_class = ProtoField.uint8 ("sxuptp.usb.bDeviceClass", "bDeviceClass", base.HEX)
+f.dd_mps0  = ProtoField.uint8 ("sxuptp.usb.bMaxPacketSize0", "bMaxPacketSize0")
+f.dd_vid   = ProtoField.uint16("sxuptp.usb.idVendor", "idVendor", base.HEX)
+f.dd_pid   = ProtoField.uint16("sxuptp.usb.idProduct", "idProduct", base.HEX)
+f.dd_ncfg  = ProtoField.uint8 ("sxuptp.usb.bNumConfigurations", "bNumConfigurations")
+f.if_class = ProtoField.uint8 ("sxuptp.usb.bInterfaceClass", "bInterfaceClass", base.HEX)
+f.if_sub   = ProtoField.uint8 ("sxuptp.usb.bInterfaceSubClass", "bInterfaceSubClass", base.HEX)
+f.if_proto = ProtoField.uint8 ("sxuptp.usb.bInterfaceProtocol", "bInterfaceProtocol", base.HEX)
+f.ep_addr  = ProtoField.uint8 ("sxuptp.usb.bEndpointAddress", "bEndpointAddress", base.HEX)
+f.ep_attr  = ProtoField.uint8 ("sxuptp.usb.bmAttributes", "bmAttributes", base.HEX)
+f.ep_mps   = ProtoField.uint16("sxuptp.usb.wMaxPacketSize", "wMaxPacketSize")
+-- device-list reply entries
+f.dl_count = ProtoField.uint8 ("sxuptp.devlist.count", "Entry count")
+f.dl_port  = ProtoField.string("sxuptp.devlist.port", "Port")
+f.dl_prod  = ProtoField.string("sxuptp.devlist.product", "Product")
+f.dl_vid   = ProtoField.uint16("sxuptp.devlist.vid", "idVendor", base.HEX)
+f.dl_pid   = ProtoField.uint16("sxuptp.devlist.pid", "idProduct", base.HEX)
 -- identity reply decoded fields
 f.id_model = ProtoField.string("sxuptp.id.model", "Model")
 f.id_mac   = ProtoField.string("sxuptp.id.mac", "MAC")
@@ -152,6 +183,115 @@ local function cstr(tvb, off)  -- NUL/printable-terminated ASCII at off
   end
   if e == off then return "", 0 end
   return tvb(off, e-off):string(), e-off
+end
+
+local function ipstr(tvb, off)
+  return string.format("%d.%d.%d.%d", tvb(off,1):uint(), tvb(off+1,1):uint(),
+    tvb(off+2,1):uint(), tvb(off+3,1):uint())
+end
+
+local USB_CLASS = { [0x00]="(per-interface)", [0x03]="HID", [0x08]="Mass Storage",
+  [0x09]="Hub", [0x0a]="CDC-Data", [0xff]="Vendor" }
+local USB_EPTYPE = { [0]="Control", [1]="Isochronous", [2]="Bulk", [3]="Interrupt" }
+
+-- Walk the device + config/interface/endpoint descriptors embedded in a 0x2908
+-- announcement. Multibyte fields are BIG-endian here (the hub byte-swaps them).
+local function dissect_usb_descriptors(tvb, tree, pinfo)
+  -- device descriptor at +0x40
+  if tvb:len() >= 0x52 and tvb(0x40,1):uint() == 0x12 and tvb(0x41,1):uint() == 0x01 then
+    local d = tree:add(sxuptp, tvb(0x40,18), "USB device descriptor")
+    d:add(f.dd_bcdusb, tvb(0x42,2))
+    d:add(f.dd_class,  tvb(0x44,1)):append_text(" " .. (USB_CLASS[tvb(0x44,1):uint()] or ""))
+    d:add(f.dd_mps0,   tvb(0x47,1))
+    d:add(f.dd_vid,    tvb(0x48,2))
+    d:add(f.dd_pid,    tvb(0x4a,2))
+    d:add(f.dd_ncfg,   tvb(0x51,1))
+    pinfo.cols.info:append(string.format(" VID:PID=%04x:%04x", tvb(0x48,2):uint(), tvb(0x4a,2):uint()))
+  end
+  -- configuration block at +0x80: walk bLength-chained descriptors
+  local off = 0x80
+  if tvb:len() < off + 4 or tvb(off,1):uint() ~= 0x09 or tvb(off+1,1):uint() ~= 0x02 then return end
+  local total = off + tvb(off+2,2):uint()           -- wTotalLength (BE)
+  if total > tvb:len() then total = tvb:len() end
+  local cfg = tree:add(sxuptp, tvb(off, total-off), "USB configuration")
+  while off + 2 <= total do
+    local blen = tvb(off,1):uint()
+    local dtype = tvb(off+1,1):uint()
+    if blen < 2 or off + blen > total then break end
+    if dtype == 0x04 and blen >= 9 then             -- interface
+      local it = cfg:add(sxuptp, tvb(off,blen), "Interface")
+      it:add(f.if_class, tvb(off+5,1)):append_text(" " .. (USB_CLASS[tvb(off+5,1):uint()] or ""))
+      it:add(f.if_sub,   tvb(off+6,1))
+      it:add(f.if_proto, tvb(off+7,1))
+    elseif dtype == 0x05 and blen >= 7 then         -- endpoint
+      local ea = tvb(off+2,1):uint()
+      local et = cfg:add(sxuptp, tvb(off,blen), string.format("Endpoint 0x%02x %s",
+        ea, (ea >= 0x80) and "IN" or "OUT"))
+      et:add(f.ep_addr, tvb(off+2,1))
+      et:add(f.ep_attr, tvb(off+3,1)):append_text(" " .. (USB_EPTYPE[tvb(off+3,1):uint() % 4] or ""))
+      et:add(f.ep_mps,  tvb(off+4,2))               -- BE here
+    end
+    off = off + blen
+  end
+end
+
+local function dissect_announce(tvb, tree, pinfo)
+  local code = tvb(0,2):uint()
+  local name = AN_CODE[code] or string.format("announce 0x%04x", code)
+  local a = tree:add(sxuptp, tvb(), "SXUPTP " .. name)
+  a:add(f.an_code, tvb(0,2))
+  a:add(f.an_flag, tvb(2,1))
+  a:add(f.an_devid, tvb(3,1))
+  if tvb:len() >= 8 then a:add(f.an_ip, tvb(4,4), ipstr(tvb,4)) end
+  pinfo.cols.info:append(string.format("%s devId=%d", name, tvb(3,1):uint()))
+  dissect_usb_descriptors(tvb, a, pinfo)
+end
+
+-- EXEC SCANNER CONNECT/DISCONNECT body: flag, mac_len, MAC(6), client IP(4), port
+local function dissect_scanner_body(tvb, off, tree)
+  if off + 12 > tvb:len() then return end
+  local b = tree:add(sxuptp, tvb(off), "SCANNER body")
+  b:add(f.sc_flag,   tvb(off,1))
+  b:add(f.sc_maclen, tvb(off+1,1))
+  local mac = {}
+  for i=0,5 do mac[#mac+1] = string.format("%02x", tvb(off+2+i,1):uint()) end
+  b:add(f.sc_mac, tvb(off+2,6), table.concat(mac, ":"))
+  b:add(f.sc_ip,  tvb(off+8,4), ipstr(tvb, off+8))
+  local port = cstr(tvb, off+12)
+  if port ~= "" then b:add(f.sc_port, tvb(off+12, #port)) end
+end
+
+-- device-list reply body (cmd 1): count byte, then devNN entries
+local function dissect_devlist(tvb, off, tree, pinfo)
+  if off >= tvb:len() then return false end
+  local dl = tree:add(sxuptp, tvb(off), "USB device list")
+  dl:add(f.dl_count, tvb(off,1))
+  local n = 0
+  local p = off + 1
+  while p + 6 <= tvb:len() do
+    -- entry begins at a "devNN" ASCII port name
+    if tvb(p,3):string() ~= "dev" then
+      -- scan forward to the next "dev"
+      local nxt = nil
+      for q = p, tvb:len()-3 do
+        if tvb(q,3):string() == "dev" then nxt = q break end
+      end
+      if not nxt then break end
+      p = nxt
+    end
+    local port = cstr(tvb, p)
+    if port == "" then break end
+    local prod_off = p + #port + 1
+    local prod = cstr(tvb, prod_off)
+    local e = dl:add(sxuptp, tvb(p), port .. (prod ~= "" and (" = " .. prod) or ""))
+    e:add(f.dl_port, tvb(p, #port))
+    if prod ~= "" then e:add(f.dl_prod, tvb(prod_off, #prod)) end
+    n = n + 1
+    -- advance past product + padding to the next "dev" (handled at loop top)
+    p = prod_off + #prod + 1
+  end
+  pinfo.cols.info:append(string.format("USB_DEVICE_LIST: %d device(s)", n))
+  return true
 end
 
 ----------------------------------------------------------------------
@@ -344,12 +484,26 @@ local function dissect_identity_reply(tvb, tree, pinfo)
   return true
 end
 
+-- The UDP control channel is symmetric (both ends on 19540), so port direction
+-- can't tell request from reply. Decide by content instead: identify (4) is a
+-- request; identify-reply (0x0002) / announce (0x2908/0x29eb) are from the hub;
+-- for cmd 1/2/3 a request carries an ASCII verb at offset 4, a reply a status.
+local function udp_is_request(tvb, cmd)
+  if cmd == 4 then return true end
+  if cmd == 0x0002 or cmd == 0x2908 or cmd == 0x29eb then return false end
+  if tvb:len() >= 5 then
+    local c = tvb(4,1):uint()
+    if c >= 0x41 and c <= 0x5a then return true end   -- uppercase letter = verb
+  end
+  return false
+end
+
 local function dissect_udp(tvb, pinfo, tree)
   local n = tvb:len()
   if n < 2 then return 0 end
   local root = tree:add(sxuptp, tvb(), "SXUPTP JCP")
-  local to_hub = is_to_hub(pinfo)
   local cmd = tvb(0,2):uint()
+  local to_hub = udp_is_request(tvb, cmd)
 
   if to_hub then                              -- request
     root:add(f.j_cmd, tvb(0,2))
@@ -361,6 +515,9 @@ local function dissect_udp(tvb, pinfo, tree)
       if name ~= "" then
         root:add(f.j_name, tvb(4, #name))
         pinfo.cols.info:append("JCP: " .. name)
+        if name:find("SCANNER CONNECT") or name:find("SCANNER DISCONNECT") then
+          dissect_scanner_body(tvb, 4 + #name, root)   -- flag/mac/ip/port follow the verb
+        end
       else
         pinfo.cols.info:append(string.format("JCP cmd=0x%04x", cmd))
       end
@@ -368,25 +525,34 @@ local function dissect_udp(tvb, pinfo, tree)
     return n
   end
 
-  -- reply
-  if n >= 4 and tvb(2,2):uint() == 0x9506 then
+  -- reply (from hub)
+  if cmd == 0x2908 or cmd == 0x29eb then       -- device-attach announcement
+    dissect_announce(tvb, tree, pinfo)
+    return n
+  end
+  if n >= 4 and tvb(2,2):uint() == 0x9506 then  -- identity reply
     root:add(f.j_cmd, tvb(0,2))
     root:add(f.j_sub, tvb(2,2))
     dissect_identity_reply(tvb, root, pinfo)
     return n
   end
-  -- generic reply header {cmd, status, resv, length, body}
+  -- generic reply header {cmd, status, gen/resv, length, body}
   root:add(f.j_cmd, tvb(0,2))
   if n >= 4 then root:add(f.j_rstat, tvb(2,2)) end
   if n >= 8 then
     local blen = tvb(6,2):uint()
     root:add(f.j_rlen, tvb(6,2))
-    if blen > 0 and n >= 8 then
+    if blen > 0 then
       local body = tvb(8, math.min(blen, n-8))
       root:add(f.j_body, body)
-      local txt = cstr(tvb, 8)
-      if txt ~= "" then pinfo.cols.info:append("JCP reply: " .. txt)
-      else pinfo.cols.info:append(string.format("JCP reply len=%d", blen)) end
+      -- cmd-1 replies carrying a devNN list are the USB device list
+      if cmd == 1 and n >= 13 and tvb(9,3):string() == "dev" then
+        dissect_devlist(tvb, 8, root, pinfo)
+      else
+        local txt = cstr(tvb, 8)
+        if txt ~= "" then pinfo.cols.info:append("JCP reply: " .. txt)
+        else pinfo.cols.info:append(string.format("JCP reply len=%d", blen)) end
+      end
     else
       pinfo.cols.info:append("JCP reply (empty / no-change)")
     end

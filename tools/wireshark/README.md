@@ -8,11 +8,18 @@ were reverse-engineered in this repo — see
 
 ## What it decodes
 
-- **UDP 19540 — JCP control**
+- **UDP 19540 — JCP control** (symmetric port; request/reply decided by content)
   - `IDENTIFY/DISCOVER` (cmd 4 / sub 0x9506) request, and the reply fully decoded
     (model, MAC, IP, JCP version, attached USB device, hostname, firmware).
-  - Named JCP verbs (`GET USB_DEVICE_LIST`, `EXEC SCANNER CONNECT/DISCONNECT`, …)
-    with command class and body; generic reply header `{cmd,status,_,len,body}`.
+  - Named JCP verbs (`GET USB_DEVICE_LIST`, `EXEC SCANNER CONNECT/DISCONNECT`, …);
+    the `SCANNER CONNECT/DISCONNECT` **body** is decoded (flag, device MAC, client
+    IP, port name).
+  - **Replies**: `GET USB_DEVICE_LIST` → entry count + each `devNN` port/product;
+    `OK`/empty ("no-change") replies; generic `{cmd,status,gen,len,body}` header.
+  - **`0x2908` / `0x29eb` device-attach announcement** (the hub's push after
+    `EXEC SCANNER CONNECT`): devId, server IP, and the embedded USB **device** and
+    **configuration** descriptors (VID/PID, interface class, endpoints) — decoded
+    big-endian as the firmware re-encodes them.
 - **TCP 19540 — data channel** (stream-reassembled)
   - Request types: `CONTROL-IN/OUT`, `BULK-IN/OUT`, `INTERRUPT-IN`, with
     seq, devId, endpoint, `0x8000|wMaxPacketSize`, transfer length, interval.
