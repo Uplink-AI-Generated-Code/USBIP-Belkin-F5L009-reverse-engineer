@@ -170,6 +170,7 @@ class SxuptpClient:
         self._client_ip = client_ip
         self.seq = 0
         self.dev_id: int | None = None
+        self.announce: dict | None = None   # parsed 0x2908 device-attach announcement
 
         self._rxbuf = b""          # persistent data-channel read buffer (framing)
         self._intr_outstanding = 0 # interrupt_read submits sent but not yet answered
@@ -207,23 +208,10 @@ class SxuptpClient:
         except socket.timeout:
             pass
 
-        # best-effort, NON-blocking devId capture from the hub's device-attach
-        # announcement (JCP 0x2908, or 0x29eb in state 2): byte[3] is the devId.
-        # Gate on the opcode so we don't mistake the "OK" reply (byte[3]==0) or a
-        # device-list reply for the grant. See SXUPTP_PROTOCOL.md "Device-attach
-        # announcement". (If the announcement doesn't reach this socket, dev_id
-        # stays None and find_dev_id() sweeps.)
-        if self._bc is not None:
-            self._bc.settimeout(0.0)
-            try:
-                d, a = self._bc.recvfrom(4096)
-                if (a[0] == self.host and len(d) > 3
-                        and d[0] == 0x29 and d[1] in (0x08, 0xeb)):
-                    self.dev_id = d[3]
-            except (BlockingIOError, OSError):
-                pass
-
-        # TCP match immediately (catch the OPEN_WAIT window)
+        # TCP match immediately (catch the OPEN_WAIT window). The device-attach
+        # announcement (0x2908) is captured AFTER the match, not here: it lands on
+        # the grant socket a few ms after connect, so a pre-match drain races it
+        # (and a blocking wait here would miss the time-sensitive OPEN_WAIT window).
         t0 = time.time()
         while time.time() - t0 < window:
             s = socket.socket()
@@ -242,11 +230,42 @@ class SxuptpClient:
                 s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER,
                              struct.pack("ii", 1, 0))
                 self.tcp = s
+                # By now the announcement has been buffered on the grant socket
+                # during the match; a non-blocking drain reliably captures it.
+                self._capture_announce()
                 return self.dev_id
             except (ConnectionResetError, ConnectionAbortedError, OSError):
                 s.close()
             time.sleep(0.08)
         raise TimeoutError("could not match the OPEN_WAIT window (power-cycle if slot busy)")
+
+    def _capture_announce(self) -> None:
+        """Non-blocking: drain the grant/connect sockets for the hub's device-attach
+        announcement (JCP 0x2908, or 0x29eb in state 2) and, if found, set
+        ``self.dev_id`` and ``self.announce`` (devId + the attached device's USB
+        descriptors — see protocol.parse_announce / SXUPTP_PROTOCOL.md). Gating on
+        the opcode avoids mistaking the "OK" reply (byte[3]==0) or a device-list
+        reply for the grant. Best-effort: if the announcement doesn't reach a
+        socket we read, dev_id is left as-is and find_dev_id() sweeps instead."""
+        for sk in (self._bc, self._udp):
+            if sk is None:
+                continue
+            try:
+                sk.settimeout(0.0)
+            except OSError:
+                continue
+            for _ in range(8):          # drain a few pending datagrams
+                try:
+                    d, a = sk.recvfrom(4096)
+                except (BlockingIOError, OSError):
+                    break
+                if a[0] != self.host or len(d) < 4 or d[0] != 0x29 or d[1] not in (0x08, 0xeb):
+                    continue
+                try:
+                    self.announce = p.parse_announce(d)
+                    self.dev_id = self.announce["dev_id"]
+                except ValueError:
+                    pass
 
     def reconnect(self, window: float = 5.0) -> int | None:
         """Re-establish the SXUPTP data channel as a NEW job, to reset the hub's
@@ -290,15 +309,6 @@ class SxuptpClient:
             self._udp.recv(256)
         except socket.timeout:
             pass
-        if self._bc is not None:
-            self._bc.settimeout(0.0)
-            try:
-                d, a = self._bc.recvfrom(4096)
-                if (a[0] == self.host and len(d) > 3
-                        and d[0] == 0x29 and d[1] in (0x08, 0xeb)):   # 0x2908/0x29eb announce
-                    self.dev_id = d[3]
-            except (BlockingIOError, OSError):
-                pass
         t0 = time.time()
         while time.time() - t0 < window:
             s = socket.socket()
@@ -313,6 +323,7 @@ class SxuptpClient:
                     pass
                 s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
                 self.tcp = s
+                self._capture_announce()   # announcement is buffered by now
                 return self.dev_id
             except (ConnectionResetError, ConnectionAbortedError, OSError):
                 s.close()

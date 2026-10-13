@@ -158,7 +158,18 @@ byte-swaps them, unlike raw USB little-endian):
 Example (Corsair Voyager SliderX1): devId 5, VID:PID `0x1b1c:0x1a15`, interface
 class 0x08 (Mass Storage) / 0x06 (SCSI) / 0x50 (BOT), endpoints `0x01` OUT and
 `0x82` IN, both bulk 512. Decoded by the Wireshark dissector
-([`../tools/wireshark/sxuptp.lua`](../tools/wireshark/sxuptp.lua)).
+([`../tools/wireshark/sxuptp.lua`](../tools/wireshark/sxuptp.lua)) and parsed by
+`protocol.parse_announce()`.
+
+**Where it lands (CONFIRMED live from 192.168.2.50):** the hub pushes it to the
+client's **`:19540` grant socket** (the `client_ip:19540` bind), not the ephemeral
+connect socket — twice, once after each of connect-init and connect-commit — and
+it arrives a few ms *after* connect. So the client captures it **after** the
+OPEN_WAIT TCP match (when it's buffered), never with a pre-match blocking wait
+(that would miss the time-sensitive match window). `SxuptpClient` does this in
+`_capture_announce()` and exposes the result as `client.announce` /
+`client.dev_id` — giving a deterministic devId with no probe sweep (verified: the
+announced devId returns the matching VID:PID on a live GET_DESCRIPTOR).
 
 ### JCP — confirmed live against the device
 

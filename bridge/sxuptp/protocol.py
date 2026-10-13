@@ -187,6 +187,72 @@ def parse_identity(buf: bytes) -> dict:
         "firmware": _cstr(buf, 0x84),
     }
 
+ANNOUNCE_CODES = (0x2908, 0x29eb)   # device-attach announcement (state 1 / state 2)
+
+
+def parse_announce(buf: bytes) -> dict:
+    """Parse the hub's device-attach announcement, pushed over UDP 19540 right
+    after EXEC SCANNER CONNECT (JCP opcode 0x2908, or 0x29eb in state 2).
+    CONFIRMED against the 3-minute idle capture; see ../SXUPTP_PROTOCOL.md.
+
+    Carries the devId (byte[3]) and the attached device's USB descriptors.
+    **Multi-byte fields in the embedded descriptors are BIG-endian here** (the hub
+    byte-swaps them, unlike raw USB little-endian), so `device_descriptor_raw` /
+    `config_descriptor_raw` are NOT standard-USB-order — use the decoded ints
+    (vid/pid/endpoints) or byte-swap before handing to a USB/IP stack.
+
+    Returns {code, flag, dev_id, server_ip, vid, pid, device_descriptor{...},
+    interface{...}, endpoints[...], device_descriptor_raw, config_descriptor_raw}.
+    """
+    if len(buf) < 4 or struct.unpack_from(">H", buf, 0)[0] not in ANNOUNCE_CODES:
+        raise ValueError("not a device-attach announcement")
+    out: dict = {
+        "code": struct.unpack_from(">H", buf, 0)[0],
+        "flag": buf[2],
+        "dev_id": buf[3],
+    }
+    if len(buf) >= 8:
+        out["server_ip"] = ".".join(str(x) for x in buf[4:8])
+    # USB device descriptor at +0x40 (18 bytes, BE multibyte)
+    dd: dict = {}
+    if len(buf) >= 0x52 and buf[0x40] == 0x12 and buf[0x41] == 0x01:
+        dd = {
+            "bcdUSB": int.from_bytes(buf[0x42:0x44], "big"),
+            "bDeviceClass": buf[0x44],
+            "bMaxPacketSize0": buf[0x47],
+            "idVendor": int.from_bytes(buf[0x48:0x4a], "big"),
+            "idProduct": int.from_bytes(buf[0x4a:0x4c], "big"),
+            "bNumConfigurations": buf[0x51],
+        }
+        out["vid"] = dd["idVendor"]
+        out["pid"] = dd["idProduct"]
+        out["device_descriptor_raw"] = bytes(buf[0x40:0x52])
+    out["device_descriptor"] = dd
+    # configuration block at +0x80: walk interface + endpoint descriptors
+    iface: dict = {}
+    eps: list = []
+    off = 0x80
+    if len(buf) >= off + 4 and buf[off] == 0x09 and buf[off + 1] == 0x02:
+        total = min(off + int.from_bytes(buf[off + 2:off + 4], "big"), len(buf))
+        out["config_descriptor_raw"] = bytes(buf[off:total])
+        pos = off
+        while pos + 2 <= total:
+            blen, dtype = buf[pos], buf[pos + 1]
+            if blen < 2 or pos + blen > total:
+                break
+            if dtype == 0x04 and blen >= 9:
+                iface = {"bInterfaceClass": buf[pos + 5],
+                         "bInterfaceSubClass": buf[pos + 6],
+                         "bInterfaceProtocol": buf[pos + 7]}
+            elif dtype == 0x05 and blen >= 7:
+                eps.append({"addr": buf[pos + 2], "attributes": buf[pos + 3],
+                            "wMaxPacketSize": int.from_bytes(buf[pos + 4:pos + 6], "big")})
+            pos += blen
+    out["interface"] = iface
+    out["endpoints"] = eps
+    return out
+
+
 # --- data channel (TCP 19540) message type ------------------------------
 # CONFIRMED: type u16 = (dir << 8) | category
 DIR_REQUEST = 0x00   # host -> device
@@ -315,6 +381,27 @@ def _selftest() -> None:
     assert info["mac"] == "00:1c:df:11:cb:6d" and info["ip"] == "192.168.2.3", info
     assert info["usb_device"] == "SONiX SI Gaming Keyboard" and info["firmware"] == "1.2.0", info
 
+    # device-attach announcement (JCP 0x2908) vs the real 3-min idle capture (frame 21)
+    an = bytearray(0xa0)
+    an[0x00:0x08] = bytes.fromhex("29080105c0a80203")
+    an[0x40:0x52] = bytes.fromhex("1201021000000040" "1b1c1a1511000102" "0301")
+    an[0x80:0xa0] = bytes.fromhex("0902002001010080" "fa09040000020806"
+                                  "5000070501020200" "0007058202020000")
+    info = parse_announce(bytes(an))
+    assert info["code"] == 0x2908 and info["dev_id"] == 5 and info["server_ip"] == "192.168.2.3", info
+    assert info["vid"] == 0x1b1c and info["pid"] == 0x1a15, info
+    assert info["device_descriptor"]["bMaxPacketSize0"] == 64, info
+    assert info["interface"] == {"bInterfaceClass": 0x08, "bInterfaceSubClass": 0x06,
+                                 "bInterfaceProtocol": 0x50}, info
+    assert info["endpoints"] == [
+        {"addr": 0x01, "attributes": 0x02, "wMaxPacketSize": 512},
+        {"addr": 0x82, "attributes": 0x02, "wMaxPacketSize": 512}], info
+    try:
+        parse_announce(bytes.fromhex("00020000"))  # not an announcement
+        assert False, "should have raised"
+    except ValueError:
+        pass
+
     # control-IN request bytes vs the ground-truth driver capture (string desc #2)
     assert control_read(dev_id=5, bm_request_type=0x80, b_request=0x06,
                         w_value=0x0302, w_index=0x0409, length=0xFF, seq=6).hex() == \
@@ -329,10 +416,14 @@ def _selftest() -> None:
     assert status2 == STATUS_FAIL and dd2 == b"", (status2, dd2)
 
     # bulk header layout (pybelkusb-faithful: field2 0x0003, devId<<8|ep_addr, ...)
+    # The [10:12] half-word is 0x8000|mps; default mps=512 (0x8200) matches the
+    # vendor driver for a high-speed bulk endpoint (see bulk_write docstring).
     bw = bulk_write(dev_id=5, ep_addr=0x02, payload=b"ABCD", seq=1)
-    assert bw.hex() == "80030001000305020201804000000000000441424344", bw.hex()
+    assert bw.hex() == "80030001000305020201820000000000000441424344", bw.hex()
+    assert bulk_write(dev_id=5, ep_addr=0x02, payload=b"ABCD", seq=1, mps=64).hex() == \
+        "80030001000305020201804000000000000441424344"
     br = bulk_read(dev_id=5, ep_addr=0x81, length=512, seq=2)
-    assert br.hex() == "000300020003058101018040000000000200", br.hex()
+    assert br.hex() == "000300020003058101018200000000000200", br.hex()
     print("protocol selftest: OK")
 
 
