@@ -779,6 +779,30 @@ class SxuptpClient:
         self._intr_outstanding -= 1          # answered; next call resubmits
         return status, data
 
+    def isoc_in(self, ep_addr: int, packet_lengths: list[int], interval: int = 1,
+                timeout: float | None = None) -> tuple[int, list[p.IsocPacket]]:
+        """One isochronous IN request -> (status, packets). CONFIRMED live.
+
+        Asks the hub to poll `ep_addr` for len(packet_lengths) frames. The hub
+        answers once the frames have elapsed, returning every packet's offset,
+        actual length and status; packets the device did not fill have
+        actual_length 0. Must be called on the node that owns the streaming
+        endpoint, after the interface's alt setting has been selected.
+
+        This is a single synchronous request/reply; pipelining several in
+        flight (needed to sustain video) belongs to the ChannelMux.
+        """
+        if self.tcp is None or self.dev_id is None:
+            raise RuntimeError("not attached")
+        mps = self.ep_mps.get(ep_addr, max(packet_lengths))
+        self.seq = (self.seq + 1) & 0xFFFF
+        self.tcp.sendall(p.isoc_read(self.dev_id, ep_addr, packet_lengths,
+                                     seq=self.seq, mps=mps, interval=interval))
+        status, body = self._read_reply(self.timeout if timeout is None else timeout)
+        if status != p.STATUS_OK:
+            return status, []
+        return status, p.parse_isoc_reply(body)
+
     def find_dev_id(self, candidates: tuple[int, ...] = (1, 2, 3, 4, 5, 6, 7, 8, 0),
                     want_vid: int | None = None, want_pid: int | None = None,
                     exclude: tuple[int, ...] = ()) -> int:

@@ -424,6 +424,31 @@ def _selftest() -> None:
         "80030001000305020201804000000000000441424344"
     br = bulk_read(dev_id=5, ep_addr=0x81, length=512, seq=2)
     assert br.hex() == "000300020003058101018200000000000200", br.hex()
+    # isoc IN (type 0x0004): golden request bytes (header decoded from firmware,
+    # verified live), one 12-byte descriptor per packet
+    ir = isoc_read(dev_id=6, ep_addr=0x81, packet_lengths=[1024, 1024], seq=9)
+    assert ir.hex() == ("000400090004" "0681" "0101" "8" "3ff" "0001" "0000" "0002"
+                        "0000" "00000800"
+                        "00000000" "00000400" "00000000"
+                        "00000400" "00000400" "00000000"), ir.hex()
+    # reply: golden shape from the live camera (count, table, then payload)
+    body = (bytes.fromhex("0003") +
+            bytes.fromhex("00000000" "00000004" "00000000") +
+            bytes.fromhex("00000004" "00000000" "00000000") +
+            bytes.fromhex("00000004" "00000002" "00000000") +
+            b"\x0c\x8c" b"\xaa\xbb\xcc\xdd")
+    pk = parse_isoc_reply(body)
+    assert [(x.offset, x.actual_length, x.status) for x in pk] == \
+        [(0, 4, 0), (4, 0, 0), (4, 2, 0)], pk
+    assert pk[0].data == b"\x0c\x8c\xaa\xbb" and pk[1].data == b"" and pk[2].data == b"\xcc\xdd"
+    for bad in (b"", bytes.fromhex("0002") + bytes(12),       # truncated table
+                bytes.fromhex("0001" "00000000" "00000009" "00000000") + b"xx"):  # overrun
+        try:
+            parse_isoc_reply(bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"accepted bad isoc reply {bad.hex()}")
     print("protocol selftest: OK")
 
 
@@ -527,6 +552,65 @@ def bulk_read(dev_id: int, ep_addr: int, length: int, seq: int = 0,
                        0x0003, seq & 0xFFFF, 0x0003,
                        ((dev_id & 0xFF) << 8) | (ep_addr & 0xFF),
                        ep_addr & 0x0F, 0x01, 0x8000 | (mps & 0x7FFF), 0, length)
+
+
+def isoc_read(dev_id: int, ep_addr: int, packet_lengths: list[int], seq: int = 0,
+              mps: int = 0x3FF, interval: int = 1) -> bytes:
+    """Isochronous IN — **type 0x0004 (category 4)**. CONFIRMED live (UVC camera).
+
+    24-byte header + one 12-byte descriptor per packet (the hub blocks waiting
+    for them; omit them and the channel jams until the hub is rebooted):
+        0004 <seq> 0004 <devId<<8|ep> <ep&0xF> 01 <0x8000|mps> <interval>
+        0000 <numPackets> 0000 <u32 total length>
+        { <u32 offset> <u32 length> <u32 0> } * numPackets
+    The hub only serves isoc on the node that owns the streaming endpoint.
+    See SXUPTP_PROTOCOL.md ("Isochronous IN").
+    """
+    n = len(packet_lengths)
+    if not 0 < n <= 0xFFFF:
+        raise ValueError(f"bad isoc packet count: {n}")
+    hdr = struct.pack(">HHHHBBHHHHHI",
+                      0x0004, seq & 0xFFFF, 0x0004,
+                      ((dev_id & 0xFF) << 8) | (ep_addr & 0xFF),
+                      ep_addr & 0x0F, 0x01, 0x8000 | (mps & 0x7FFF),
+                      interval & 0xFFFF, 0x0000, n, 0x0000, sum(packet_lengths))
+    descs, off = [], 0
+    for ln in packet_lengths:
+        descs.append(struct.pack(">III", off, ln, 0))
+        off += ln
+    return hdr + b"".join(descs)
+
+
+@dataclass
+class IsocPacket:
+    """One isochronous packet of an isoc IN reply."""
+    offset: int          # offset into the reply's concatenated payload
+    actual_length: int   # bytes the device delivered (0 = nothing this frame)
+    status: int          # per-packet status (0 = OK)
+    data: bytes = b""
+
+
+def parse_isoc_reply(body: bytes) -> list[IsocPacket]:
+    """Parse the body of an isoc IN reply (after the 10-byte header). CONFIRMED live.
+
+        <u16 numPackets> { <u32 offset> <u32 actual_length> <u32 status> } * n
+        <payload: the packets' bytes, concatenated>
+    """
+    if len(body) < 2:
+        raise ValueError(f"short isoc reply: {len(body)} B")
+    n = struct.unpack_from(">H", body, 0)[0]
+    table_end = 2 + 12 * n
+    if len(body) < table_end:
+        raise ValueError(f"isoc table truncated: {len(body)} < {table_end}")
+    payload = body[table_end:]
+    pkts = []
+    for i in range(n):
+        off, actual, st = struct.unpack_from(">III", body, 2 + 12 * i)
+        if off + actual > len(payload):
+            raise ValueError(f"isoc packet {i} overruns payload "
+                             f"({off}+{actual} > {len(payload)})")
+        pkts.append(IsocPacket(off, actual, st, payload[off:off + actual]))
+    return pkts
 
 
 # A data-channel transfer reply has a 10-byte header, then `size` bytes of data.

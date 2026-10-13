@@ -834,6 +834,43 @@ and replies `-ERR_HDR-` (`sub_0031E414`).
 | `sub_0031E414` | reject / send `-ERR_HDR-` |
 | `sub_00304174` | per-transfer job setup (type 1 path) |
 
+### Isochronous IN (type 0x0004) — CONFIRMED live with a UVC camera (spike, 2026-10-13)
+
+Decoded from the parser (`sub_0030481C`, cat 4 → `0x304C30` → shared engine
+`0x304904`, then `0x304DDA`/`0x304DC0`) and verified against a "Generic HD camera"
+(349c:0411, UVC, YUY2) on the hub. Request = 24-byte header **plus
+`numPackets × 12` descriptor bytes** (omit them and the hub waits for them forever,
+jamming the data channel until reboot):
+
+```
+[0:2]   0x0004          type            [12:14] interval (1)
+[2:4]   seq             [14:16] 0 (unknown, stored @+0x10)
+[4:6]   0x0004          [16:18] numPackets
+[6]     devId           [18:20] flags (bit15 tested; 0 works)
+[7]     ep addr (0x81)  [20:24] u32 total length (numPackets*L)
+[8:10]  (ep&0xF)<<8|1   [24:]   numPackets x 12-byte descriptors
+[10:12] 0x8000|mps      (request descriptors: u32 offset, u32 length, u32 0)
+```
+
+Reply = standard 10-byte header (`type 0x0004`, seq, status, size), then
+`u16 numPackets`, `numPackets x {u32 offset, u32 actual_length, u32 status}`, then
+the concatenated payload bytes. Most packets are empty (actual_length 0); non-empty
+ones begin with a UVC payload header (`0c 8c <PTS> ...`).
+
+- Isoc IN is only served on the **second camera node** (e.g. dev05 of dev04/dev05);
+  the first node accepts the request but never answers (same per-node split as the
+  composite keyboard). Node numbers shift after a hub reboot.
+- Setup before streaming works through the normal control path: UVC
+  `SET_CUR`/`GET_CUR` PROBE+COMMIT (wIndex = streaming interface), then
+  `SET_INTERFACE` alt 1.
+- mps `0x1400` (the descriptor's high-bandwidth wMaxPacketSize) and plain `0x3FF` both
+  deliver data; the early empty replies were camera warm-up after `SET_INTERFACE`, not
+  the packet size. Sequential 8-packet requests take ~20 ms each (~25 KB/s of 320x240
+  YUY2), so sustained video needs several requests in flight.
+- A malformed descriptor block (`len,off,0` order) jammed the channel; reboot via HTTP.
+- Not yet explored: isoc OUT (0x8004), sustained throughput/frame assembly,
+  cancelling a pending request, the u16 at [14:16].
+
 ### Still open
 
 - Which of categories 2/3/4 is bulk vs interrupt vs isoc specifically (the
