@@ -67,6 +67,17 @@ value and returns to the parent menu**, and out-of-range input is rejected with
 destructively. (Config writes to EEPROM are the destructive JCP ops listed below;
 avoid committing IP/DHCP/password changes.)
 
+**No hidden telnet commands.** The TCP/23 menu has no undocumented backdoor
+command; the only gating is the admin flag (above), which merely hides
+privileged items until `root` login. Two caveats: (1) the firmware string table
+carries `Configure NetWare`, `Configure AppleTalk`, and `Configure SNMP`
+(`0x0035a959`/`0x0035a99b`/`0x0035aa1f`) menu entries that are compiled-in but
+**suppressed** on this build (never shown in the live menu). (2) The CREAM
+platform's interactive debug shells — `DISH` (Debugging shell 2.5.0), `CAKE`
+(kernel debugger), `SXUPDEB`, `USBDEB`, `OHCIDEB`, `EHCIDEB`, `HeDEB`, `TCPDEB` —
+are a powerful command surface but reached over the **physical UART console**
+(ARM-mode low-level driver via veneer `0x00339fa0`), **not** over network telnet.
+
 ### Web (HTTP 80) — empty-password login, template engine
 Login posts `login_password` to `/en/login/login.htm` (empty password works;
 auth is session/IP-based). Pages are rendered by a server-side template engine
@@ -82,6 +93,29 @@ etc. Known endpoints (`/en/...`):
 | `factory/exec.htm` | **factory reset** [destructive — avoid] |
 | `mnt/loginfo.htm` | event log |
 | `mnt/update.htm` → `print/exec.htm` | **firmware update** (multipart upload) |
+
+#### Hidden `/en/debug/` tree — UNAUTHENTICATED live USB inventory
+An unlinked, **English-only** debug UI exists under `/en/debug/` (no `debug/` dir
+in any of the other 13 locale trees — the signature of leftover developer
+tooling). It is not reachable from `top.htm`/`menu.htm` and is backed by live
+handler code (the "Debug Page" body at RAM `0x0033bd37`/`0x0033c314`), not static
+files. **Confirmed live 2026-10-13 against `192.168.2.3:80`, served with NO login
+at all** (not merely empty-password — the pages sit outside the normal frameset
+auth path):
+
+| path | serves |
+|---|---|
+| `debug/index.htm`, `debug/menu.htm` | debug landing / nav (HTTP 200) |
+| `debug/devinfo.htm` | **live device table**: renders `dmax = N` + `dev = Array(...)` of the currently-attached slot numbers |
+| `debug/device1.htm` … `device23.htm` | per-slot **full USB descriptor dump** (`device24+` → 404, matching the 23-slot ceiling) |
+
+`deviceN.htm` prints the raw descriptor for whatever is in slot N: speed,
+address, `idVendor`/`idProduct`, `iManufacturer`/`iProduct` strings, and the full
+config/interface/endpoint descriptors (an unpopulated slot returns an empty
+cell). Live example (slot 4): `idVendor=0x0C45 idProduct=0x8603 [SONiX] [SI
+Gaming Keyboard]`, two INTR interfaces on EP 0x81/0x82 — the composite HID split.
+**Security impact:** anyone who can reach port 80 can read the live USB device
+inventory and descriptors without authenticating.
 
 ### JCP — system/config command set (table @ `0x33A4CC`)
 JCP (`sub_0032FE14`) dispatches an ASCII command name against a table. The
