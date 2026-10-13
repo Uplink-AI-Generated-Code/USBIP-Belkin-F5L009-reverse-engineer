@@ -61,6 +61,7 @@ Other things worth a slow look:
 | `addr_test.py`    | Is there an addressing bug? Writes a self-ID block at several offsets, reads each back (match / alias / garbage). |
 | `ramp_test.py`    | In one attach, what per-`WRITE(10)` size does the hub tolerate? Ramps 0.5 KB → 128 KB. |
 | `sustain_test.py` | How far does a sustained write get, and does read-drain / a longer timeout help? Writes N MB, optional verify. |
+| `idle_survival_test.py` | Reproduces the vendor's IDLE connection: holds ONE channel, idles like the vendor (`--mode tur\|read\|quiet`, `--hz`), measures survival both client-side and from the web event log (`loginfo.htm`). Our 1 Hz TUR wedges at ~70 s (vendor idle lives 192 s) — a vendor-like idle pattern does not reset the ~69 s Salc lease. |
 | `recover.sh`      | HTTP-reboot the hub to clear a stuck SXUPTP slot after a wedge. |
 
 ### Examples
