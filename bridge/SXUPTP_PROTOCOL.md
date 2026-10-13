@@ -879,6 +879,20 @@ ones begin with a UVC payload header (`0c 8c <PTS> ...`).
   L=3071 never got a reply (8 does; kernel-driven 19-packet chunks do), so large
   requests are unreliable. Whether a faster isoc service exists (more requests in
   flight, other header fields, the unknown [14:16]) is unresolved.
+- **Replacement camera ("GENERAL WEBCAM", UVC + UAC mic, MJPEG/YUY2, 7 alt settings)**,
+  same hub, same behaviour: a sequential stream is stable, but reply latency is
+  ~13 ms + ~0.8 ms/packet (8 pkts = 20 ms, 32 pkts = 40 ms), i.e. the hub samples
+  the endpoint at ~1 packet per 1 ms frame. A high-speed camera sends up to 8
+  packets per ms (one per 125 us microframe), so ~7/8 of the stream is never read:
+  in a 32-packet window 4796/4800 packets were header-only (12 B) and the rest were
+  fragments. This, not the bridge, is why video cannot assemble. Pipelining 5
+  requests stalled the hub after 4 replies; every session that ends with isoc
+  requests pending leaves the node's slot stuck until a hub reboot (the firmware has
+  a "Cancel pkt" message we never send). The mic endpoint (0x87, interface 3) got no
+  reply on any of the three camera nodes.
+- Composite mapping note: this camera has 4 interfaces but only 3 hub nodes (one per
+  interface that has endpoints; the audio-control interface has none), so the
+  backend's "interface N -> siblings[N]" assumption would mis-route it.
 - A malformed descriptor block (`len,off,0` order) jammed the channel; reboot via HTTP.
 - Not yet explored: isoc OUT (0x8004), sustained throughput/frame assembly,
   cancelling a pending request, the u16 at [14:16].
