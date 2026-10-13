@@ -31,7 +31,7 @@ import struct
 import threading
 import time
 
-from ..sxuptp.client import ChannelMux, SxuptpClient
+from ..sxuptp.client import ChannelMux, ChannelWatcher, SxuptpClient
 from ..sxuptp import protocol as sx
 from . import protocol as u
 
@@ -72,6 +72,10 @@ class Device:
         # Hub under its claim lock, so a second IMPORT of the same busid refuses
         # instead of opening a second channel to the same node).
         self.in_use = False
+        # False once the hub's device list no longer shows this node (unplugged);
+        # the busid is kept so the device returns under the same busid on replug.
+        self.present = True
+        self._watcher: ChannelWatcher | None = None
         # serializes detach(): the handler thread and the shutdown path may both
         # tear the device down, and each channel must be disconnected exactly once.
         self._detach_lock = threading.Lock()
@@ -357,6 +361,22 @@ class Device:
                 self.ep_mux[ep] = mux
         return self.info
 
+    def watch(self, on_gone) -> None:
+        """Call `on_gone(reason)` (once, from a watcher thread) if the hub closes
+        any of this import's data channels -- the device was unplugged. Start it
+        after attach(); detach() cancels it so our own teardown never fires it."""
+        with self._detach_lock:
+            if self.client is None:
+                return
+            self._stop_watch()
+            chans = [self.client] + [sc for sc, _mux in self._secondary]
+            self._watcher = ChannelWatcher(chans, on_gone).start()
+
+    def _stop_watch(self) -> None:
+        if self._watcher is not None:
+            self._watcher.stop()
+            self._watcher = None
+
     def _open_secondary(self, iface: int, dev_id: int):
         """Attach the sibling node that carries interface `iface` and return a
         ChannelMux for it (reusing dev_id; no control on the sibling). Marks the
@@ -402,6 +422,7 @@ class Device:
         primary), release claimed sibling nodes, and reset per-session state.
         Idempotent and thread-safe: a no-op when nothing is attached."""
         with self._detach_lock:
+            self._stop_watch()               # first: closing our channels isn't an unplug
             for _sc, smux in self._secondary:
                 try:
                     smux.close()

@@ -908,6 +908,75 @@ def _mux_trace(line: str) -> None:
     os.write(2, f"[mux   {time.monotonic():.4f}] {line}\n".encode())
 
 
+class ChannelWatcher:
+    """Notices when the hub closes a device's data channel(s) -- i.e. the device
+    was unplugged (or the hub died) -- even while the channel is idle.
+
+    On unplug the hub FINs every node's data channel (see
+    memory/sxuptp-unplug-and-reconnect). Nothing else reads an idle synchronous
+    channel (mass storage), and a mux reader only fails its pending URBs, so
+    without this the USB/IP client keeps a ghost device attached.
+
+    It never consumes data: it waits for a socket to turn readable and PEEKs one
+    byte -- b"" is the FIN, an error is a reset, real bytes are just a reply in
+    flight for the sync path / mux reader and are left alone. `on_dead(reason)`
+    runs once, on the watcher thread, for the first channel found dead; stop()
+    silences it (call it BEFORE closing the channels yourself).
+    """
+
+    POLL = 0.5          # select timeout: also how fast stop() takes effect
+    BUSY_PAUSE = 0.05   # readable-with-data means a reply is pending; don't spin
+
+    def __init__(self, clients, on_dead):
+        self._clients = list(clients)
+        self._on_dead = on_dead
+        self._stop = threading.Event()
+        self._t = threading.Thread(target=self._run, daemon=True, name="channel-watch")
+
+    def start(self) -> "ChannelWatcher":
+        self._t.start()
+        return self
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def _dead_reason(self, sock) -> str | None:
+        """None while healthy, else why the channel is gone."""
+        try:
+            data = sock.recv(1, socket.MSG_PEEK | socket.MSG_DONTWAIT)
+        except (BlockingIOError, InterruptedError):
+            return None
+        except OSError as e:
+            return f"channel error: {e}"
+        return "hub closed the channel" if data == b"" else None
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            socks = [c.tcp for c in self._clients if getattr(c, "tcp", None) is not None]
+            if not socks:
+                return
+            try:
+                ready, _, _ = select.select(socks, [], [], self.POLL)
+            except (OSError, ValueError):
+                ready = socks            # one was closed under us: find out which
+            busy = False
+            for s in ready:
+                if self._stop.is_set():
+                    return
+                try:
+                    reason = self._dead_reason(s)
+                except ValueError:       # fd already closed by a local teardown
+                    continue
+                if reason is not None:
+                    if not self._stop.is_set():
+                        self._stop.set()
+                        self._on_dead(reason)
+                    return
+                busy = True
+            if busy:
+                self._stop.wait(self.BUSY_PAUSE)
+
+
 # Per-packet status for an isoc packet the hub failed or garbled (-EPROTO).
 ISOC_PKT_ERR = -71
 

@@ -111,6 +111,10 @@ class Hub:
         except OSError as e:
             raise OSError(f"cannot bind UDP {addr[0]}:{addr[1]}: {e}") from e
 
+    # Minimum gap between hub list queries triggered by clients (the vendor driver
+    # polls every ~5 s on its session socket, so this is well within what it does).
+    _REFRESH_MIN = 1.0
+
     def _discover_devices(self, host: str, client_ip: str) -> None:
         devs = SxuptpClient.discover(target=host)
         if not devs:
@@ -118,27 +122,75 @@ class Hub:
         self.mac = bytes(int(x, 16) for x in devs[0]["mac"].split(":"))
         time.sleep(1.0)   # the hub drops a device-list query issued too soon after discovery
         listed = self._list_on_session(retries=4)
-        # Group same-VID:PID nodes in list order: a composite device's interfaces
-        # are split across consecutive nodes (dev02=if0, dev03=if1). The first node
-        # of a group is the primary busid; when it attaches and finds a multi-
-        # interface config it claims the others as secondary channels (see below).
+        # A composite device's interfaces are split across consecutive same-VID:PID
+        # nodes (dev02=if0, dev03=if1). The first node of a group is the primary
+        # busid; when it attaches and finds a multi-interface config it claims the
+        # others as secondary channels (see _reconcile / Device._open_secondary).
         self._claimed: set[str] = set()         # sibling nodes hidden by a composite
         self._claim_lock = threading.Lock()
+        self.devices: dict[str, Device] = {}
+        self.names: dict[str, str] = {}
+        self._node_busid: dict[str, str] = {}
+        self._last_refresh = time.monotonic()
+        self._reconcile(listed)
+
+    def _new_device(self, busid: str, devnum: int, d: dict, siblings) -> Device:
+        return Device(self.host, self.client_ip, self.mac, d["port"], busid,
+                      busnum=1, devnum=devnum, vid=d.get("vid", 0), pid=d.get("pid", 0),
+                      udp=self._session, bc=self._grant, lock=self.attach_lock,
+                      siblings=siblings, hub=self)
+
+    def _reconcile(self, listed: list[dict]) -> None:
+        """Bring the device inventory in line with the hub's current list.
+
+        Busids are stable: a node that still shows the same VID:PID keeps its
+        busid; a node that vanished is kept but marked not present (so it returns
+        under the same busid on replug and is hidden meanwhile); a node with a
+        different device on it is re-pointed at it unless a client has it imported;
+        a brand-new node gets the lowest unused busid. Never calls the hub, so it
+        is unit-testable."""
         sib: dict[tuple[int, int], list[str]] = {}
         for d in listed:
             sib.setdefault((d.get("vid", 0), d.get("pid", 0)), []).append(d["port"])
-        self.devices: dict[str, Device] = {}
-        for i, d in enumerate(listed):
-            busid = f"1-{i + 1}"
-            siblings = tuple(sib.get((d.get("vid", 0), d.get("pid", 0)), [d["port"]]))
-            self.devices[busid] = Device(host, client_ip, self.mac, d["port"],
-                                         busid, busnum=1, devnum=i + 1,
-                                         vid=d.get("vid", 0), pid=d.get("pid", 0),
-                                         udp=self._session, bc=self._grant,
-                                         lock=self.attach_lock,
-                                         siblings=siblings, hub=self)
-        self.names = {busid: d["device"] for busid, d in zip(self.devices, listed)}
-        self._node_busid = {d.node: b for b, d in self.devices.items()}
+        with self._claim_lock:
+            by_node = {dev.node: b for b, dev in self.devices.items()}
+            seen: set[str] = set()
+            for d in listed:
+                key = (d.get("vid", 0), d.get("pid", 0))
+                siblings = tuple(sib[key])
+                busid = by_node.get(d["port"])
+                dev = self.devices.get(busid) if busid else None
+                if dev is None:
+                    n = 1
+                    while f"1-{n}" in self.devices:
+                        n += 1
+                    busid = f"1-{n}"
+                    dev = self.devices[busid] = self._new_device(busid, n, d, siblings)
+                elif (dev.vid, dev.pid) != key and not dev.in_use:
+                    dev.vid, dev.pid = key              # different device, same node
+                if not dev.in_use:
+                    dev.siblings = siblings
+                dev.present = True
+                self.names[busid] = d["device"]
+                self._node_busid[d["port"]] = busid
+                seen.add(busid)
+            for busid, dev in self.devices.items():
+                if busid not in seen:
+                    dev.present = False
+
+    def refresh(self) -> None:
+        """Re-read the hub's device list (a device may have been unplugged,
+        replugged or moved) and reconcile the inventory. Rate-limited, serialized
+        with attaches (they share the session socket), and a no-reply from the hub
+        leaves the inventory untouched rather than hiding everything."""
+        with self.attach_lock:
+            now = time.monotonic()
+            if now - self._last_refresh < self._REFRESH_MIN:
+                return
+            self._last_refresh = now
+            listed = self._query_list()
+        if listed is not None:
+            self._reconcile(listed)
 
     @property
     def ka_echoed(self) -> int:
@@ -215,16 +267,29 @@ class Hub:
                      if b != busid and d.resolved_dev_id is not None
                      and d.vid == me.vid and d.pid == me.pid)
 
-    def _list_on_session(self, retries: int = 4) -> list:
+    def _query_list(self, retries: int = 2) -> list | None:
         """GET USB_DEVICE_LIST on the shared session socket (same source port the
-        CONNECTs use)."""
+        CONNECTs use). None = the hub did not answer; [] = it answered with no
+        devices (everything unplugged)."""
         from ..sxuptp import protocol as sx
         req = sx.pack_device_list_query()        # vendor-exact full-dump request
         for _ in range(max(1, retries)):
             try:
                 self._session.send(req)
-                data = self._session.recv(8192)
-                devs = sx.parse_device_list(data)
+                return sx.parse_device_list(self._session.recv(8192))
+            except socket.timeout:
+                pass
+        return None
+
+    def _list_on_session(self, retries: int = 4) -> list:
+        """Startup variant of _query_list: retries until the hub shows >= 1 device
+        (it drops queries made too soon after discovery); [] if it never does."""
+        from ..sxuptp import protocol as sx
+        req = sx.pack_device_list_query()
+        for _ in range(max(1, retries)):
+            try:
+                self._session.send(req)
+                devs = sx.parse_device_list(self._session.recv(8192))
                 if devs:
                     return devs
             except socket.timeout:
@@ -238,7 +303,7 @@ class Hub:
         omitted: they are served through their primary busid."""
         out = []
         for busid, dev in self.devices.items():
-            if self.is_claimed(dev.node):
+            if self.is_claimed(dev.node) or not dev.present:
                 continue
             out.append(u.UsbipDevice(busid=busid, busnum=dev.busnum,
                                      devnum=dev.devnum, id_vendor=dev.vid,
@@ -268,14 +333,16 @@ class Handler(socketserver.BaseRequestHandler):
         _ver, opcode, _st = u.parse_op_header(hdr)
 
         if opcode == u.OP_REQ_DEVLIST:
+            hub.refresh()
             self.request.sendall(u.pack_devlist_reply(hub.devlist()))
             return
 
         if opcode != u.OP_REQ_IMPORT:
             return
         busid = u.parse_import_request_busid(hdr + self._recvall(32))
+        hub.refresh()                       # pick up a replugged / moved device
         dev = hub.devices.get(busid)
-        if dev is None:
+        if dev is None or not dev.present:
             self.request.sendall(u.pack_import_reply(None))
             return
         # Refuse a secondary node of a composite (already exported as part of its
@@ -301,6 +368,10 @@ class Handler(socketserver.BaseRequestHandler):
             if _TRACE:
                 self.request = _TracingSocket(self.request, busid)
                 self._busid = busid
+            # Unplug: the hub closes the data channel(s). Drop the client's USB/IP
+            # connection so its kernel detaches the device (instead of keeping a
+            # ghost attached) and the busid frees up for a replug.
+            dev.watch(lambda why: self._device_gone(busid, why))
             self._urb_loop(dev)
         finally:
             # always disconnect (idempotent), even if the client vanished before
@@ -309,6 +380,13 @@ class Handler(socketserver.BaseRequestHandler):
             hub.release(dev)
             if imported:
                 print(f"[usbip] detached {busid}")
+
+    def _device_gone(self, busid: str, why: str) -> None:
+        print(f"[usbip] {busid} gone ({why}); disconnecting the client")
+        try:
+            self.request.shutdown(socket.SHUT_RDWR)   # unblocks the URB loop's recv
+        except OSError:
+            pass
 
     @staticmethod
     def _ret_submit(cmd, status: int, data) -> bytes:
