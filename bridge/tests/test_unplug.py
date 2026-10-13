@@ -145,6 +145,40 @@ class ReconcileTest(unittest.TestCase):
         self.assertEqual(h.devlist(), [])
 
 
+class RefreshTest(unittest.TestCase):
+    """Hub.refresh() must not hide a device because of one short/empty reply."""
+
+    def _refresh_with(self, h, *replies):
+        seq = list(replies)
+        h._query_list = lambda retries=2: seq.pop(0)
+        h._CONFIRM_DELAY = 0
+        h._last_refresh = 0.0
+        h.refresh()
+        return seq
+
+    def test_one_empty_reply_does_not_hide_anything(self):
+        h = _hub([FLASH, KB1, KB2, SER])
+        left = self._refresh_with(h, [], [FLASH, KB1, KB2, SER])
+        self.assertEqual(left, [])
+        self.assertTrue(all(d.present for d in h.devices.values()))
+
+    def test_two_consistent_replies_do_hide_it(self):
+        h = _hub([FLASH, KB1, KB2, SER])
+        self._refresh_with(h, [KB1, KB2, SER], [KB1, KB2, SER])
+        self.assertFalse(h.devices["1-1"].present)
+
+    def test_no_second_query_when_nothing_is_missing(self):
+        h = _hub([FLASH, SER])
+        left = self._refresh_with(h, [FLASH, SER, KB1])
+        self.assertEqual(left, [])
+        self.assertTrue(h.devices["1-3"].present)           # newly seen: immediate
+
+    def test_unanswered_query_leaves_inventory_alone(self):
+        h = _hub([FLASH, SER])
+        self._refresh_with(h, None)
+        self.assertTrue(all(d.present for d in h.devices.values()))
+
+
 class _FakeDev:
     busid, node, vid, pid, in_use, present = "1-1", "dev01", 1, 2, False, True
     siblings = ("dev01",)

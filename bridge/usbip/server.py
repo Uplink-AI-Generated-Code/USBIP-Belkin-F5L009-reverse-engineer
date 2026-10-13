@@ -114,6 +114,7 @@ class Hub:
     # Minimum gap between hub list queries triggered by clients (the vendor driver
     # polls every ~5 s on its session socket, so this is well within what it does).
     _REFRESH_MIN = 1.0
+    _CONFIRM_DELAY = 0.5     # before re-asking whether a missing device is really gone
 
     def _discover_devices(self, host: str, client_ip: str) -> None:
         devs = SxuptpClient.discover(target=host)
@@ -189,6 +190,17 @@ class Hub:
                 return
             self._last_refresh = now
             listed = self._query_list()
+            if listed is not None:
+                # A single reply can be short or empty, so never hide a device on
+                # one reply: if any present node is missing, ask again and treat
+                # a node seen in either reply as still there.
+                nodes = {d["port"] for d in listed}
+                if any(dev.present and dev.node not in nodes
+                       for dev in self.devices.values()):
+                    time.sleep(self._CONFIRM_DELAY)
+                    again = self._query_list()
+                    if again is not None:
+                        listed = listed + [d for d in again if d["port"] not in nodes]
         if listed is not None:
             self._reconcile(listed)
 
@@ -273,6 +285,7 @@ class Hub:
         devices (everything unplugged)."""
         from ..sxuptp import protocol as sx
         req = sx.pack_device_list_query()        # vendor-exact full-dump request
+        self._drain_session()
         for _ in range(max(1, retries)):
             try:
                 self._session.send(req)
@@ -280,6 +293,19 @@ class Hub:
             except socket.timeout:
                 pass
         return None
+
+    def _drain_session(self) -> None:
+        """Discard datagrams already queued on the session socket (late replies to
+        earlier queries), so a reply is never matched to the wrong request."""
+        timeout = self._session.gettimeout()
+        self._session.settimeout(0)
+        try:
+            while True:
+                self._session.recv(8192)
+        except (BlockingIOError, OSError):
+            pass
+        finally:
+            self._session.settimeout(timeout)
 
     def _list_on_session(self, retries: int = 4) -> list:
         """Startup variant of _query_list: retries until the hub shows >= 1 device
