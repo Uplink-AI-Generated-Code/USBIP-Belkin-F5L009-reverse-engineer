@@ -207,12 +207,18 @@ class SxuptpClient:
         except socket.timeout:
             pass
 
-        # best-effort, NON-blocking devId capture from the grant on :19540
+        # best-effort, NON-blocking devId capture from the hub's device-attach
+        # announcement (JCP 0x2908, or 0x29eb in state 2): byte[3] is the devId.
+        # Gate on the opcode so we don't mistake the "OK" reply (byte[3]==0) or a
+        # device-list reply for the grant. See SXUPTP_PROTOCOL.md "Device-attach
+        # announcement". (If the announcement doesn't reach this socket, dev_id
+        # stays None and find_dev_id() sweeps.)
         if self._bc is not None:
             self._bc.settimeout(0.0)
             try:
                 d, a = self._bc.recvfrom(4096)
-                if a[0] == self.host and len(d) > 3:
+                if (a[0] == self.host and len(d) > 3
+                        and d[0] == 0x29 and d[1] in (0x08, 0xeb)):
                     self.dev_id = d[3]
             except (BlockingIOError, OSError):
                 pass
@@ -288,7 +294,8 @@ class SxuptpClient:
             self._bc.settimeout(0.0)
             try:
                 d, a = self._bc.recvfrom(4096)
-                if a[0] == self.host and len(d) > 3:
+                if (a[0] == self.host and len(d) > 3
+                        and d[0] == 0x29 and d[1] in (0x08, 0xeb)):   # 0x2908/0x29eb announce
                     self.dev_id = d[3]
             except (BlockingIOError, OSError):
                 pass
@@ -605,11 +612,14 @@ class SxuptpClient:
                     exclude: tuple[int, ...] = ()) -> int:
         """Probe candidate devIds with GET_DESCRIPTOR(device) and pick one.
 
-        The devId is a USB device address, NOT the devNN index, and the hub does
-        not announce it to us (the OPEN_WAIT grant never arrives on :19540 here).
-        So we sweep and match by the device's VID:PID when given — this is the
-        reliable node->device mapping, since GET USB_DEVICE_LIST carries the
-        VID:PID for each devNN. Without want_vid/pid we take the first OK devId.
+        The devId is a USB device address, NOT the devNN index. The hub *does*
+        announce it (byte[3] of the JCP 0x2908 device-attach announcement, which
+        also carries the USB descriptors — see SXUPTP_PROTOCOL.md), and attach()/
+        reconnect() capture it opportunistically; but that announcement may not
+        reach the socket we listen on, so this sweep is the reliable fallback: it
+        matches by the device's VID:PID when given — the dependable node->device
+        mapping, since GET USB_DEVICE_LIST carries the VID:PID for each devNN.
+        Without want_vid/pid we take the first OK devId.
         `exclude` skips handles already assigned (for duplicate VID:PID devices).
         Remembers and returns the chosen devId.
         """
