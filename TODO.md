@@ -63,3 +63,9 @@
   socket SO_REUSEADDR) on purpose, so a second bridge instance may bind :49501
   without error; it was only caught via 19540 and 3240 in testing. Consider an
   explicit single-instance guard (e.g. a lock file) if running two ever matters.
+- Keepalive runtime health check — DONE (2026-10-13). The receive thread can die
+  on a socket error mid-session; that used to go unnoticed until the hub RST'd
+  every data channel ~69s later. The Hub now runs a health thread (_start_health,
+  polls keepalive.running every 5s) that restarts the responder loudly
+  (KeepaliveResponder.restart rebinds; start() alone short-circuits while the old
+  _sock lingers). Covered by bridge/tests/test_unplug.py KeepaliveHealthTest.

@@ -79,6 +79,7 @@ class Hub:
         #             keys the session to it).
         self._grant = self._session = None
         self.keepalive = KeepaliveResponder(host, client_ip)
+        self._stop_health: threading.Event | None = None
         try:
             self._grant = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self._grant.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -99,6 +100,7 @@ class Hub:
             if os.environ.get("SXUPTP_NO_KEEPALIVE") is None:
                 if not self.keepalive.start():
                     raise OSError(f"keepalive responder: {self.keepalive.error}")
+                self._start_health()
             self._discover_devices(host, client_ip)
         except BaseException:
             self.close()
@@ -110,6 +112,33 @@ class Hub:
             sock.bind(addr)
         except OSError as e:
             raise OSError(f"cannot bind UDP {addr[0]}:{addr[1]}: {e}") from e
+
+    # How often the health check confirms the keepalive responder is still alive.
+    # Comfortably inside the ~69s Salc lease, so a recovered responder resumes
+    # echoing long before the hub would RST.
+    _HEALTH_POLL = 5.0
+
+    def _start_health(self) -> None:
+        """Watch the one host-level keepalive responder: its receive thread can die
+        on a socket error, which goes unnoticed until the hub RSTs every data
+        channel ~69s later. Poll its liveness and restart it loudly if it drops."""
+        self._stop_health = threading.Event()
+        threading.Thread(target=self._health_loop, name="keepalive-health",
+                         daemon=True).start()
+
+    def _health_loop(self) -> None:
+        stop = self._stop_health
+        assert stop is not None
+        while not stop.wait(self._HEALTH_POLL):
+            if self.keepalive.running:
+                continue
+            print(f"[usbip] WARNING: keepalive responder is down "
+                  f"({self.keepalive.error or 'thread exited'}); data channels will "
+                  f"RST in ~69s -- restarting it", file=sys.stderr, flush=True)
+            if self.keepalive.restart():
+                print("[usbip] keepalive responder restarted", file=sys.stderr, flush=True)
+            # else: restart() already logged why via KeepaliveResponder._fail; the
+            # next poll retries (e.g. the port frees up).
 
     # Minimum gap between hub list queries triggered by clients (the vendor driver
     # polls every ~5 s on its session socket, so this is well within what it does).
@@ -210,6 +239,8 @@ class Hub:
 
     def close(self) -> None:
         """Stop the keepalive responder and close the Hub's shared sockets."""
+        if self._stop_health is not None:
+            self._stop_health.set()
         try:
             self.keepalive.stop()
         except Exception:

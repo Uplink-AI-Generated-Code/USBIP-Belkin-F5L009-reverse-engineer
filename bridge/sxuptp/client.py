@@ -114,6 +114,13 @@ class KeepaliveResponder:
                 pass
             self._sock = None
 
+    def restart(self) -> bool:
+        """Tear down a dead/old socket and bind a fresh one. start() short-circuits
+        while _sock is still set, so a health check that finds the receive thread
+        dead must restart through here (stop() clears _sock first)."""
+        self.stop()
+        return self.start()
+
 
 class SxuptpClient:
     def __init__(self, host: str, port: int = p.PORT, timeout: float = 3.0):

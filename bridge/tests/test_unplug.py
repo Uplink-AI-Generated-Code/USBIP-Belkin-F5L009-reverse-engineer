@@ -8,7 +8,7 @@ import threading
 import time
 import unittest
 
-from bridge.sxuptp.client import ChannelWatcher
+from bridge.sxuptp.client import ChannelWatcher, KeepaliveResponder
 from bridge.usbip import protocol as u
 from bridge.usbip import server as srv
 
@@ -257,6 +257,62 @@ class ServerUnplugTest(unittest.TestCase):
         finally:
             server.shutdown()
             server.server_close()
+
+
+class KeepaliveHealthTest(unittest.TestCase):
+    """The one host-level keepalive responder must recover if its receive thread
+    dies, or the hub RSTs every data channel ~69s later (see Hub._health_loop)."""
+
+    LOOP = "127.0.0.1"
+
+    def _echoes(self, ka, peer, secs=4.0):
+        """True if a ping to the responder's port comes back within `secs`."""
+        peer.settimeout(0.3)
+        end = time.time() + secs
+        while time.time() < end:
+            try:
+                peer.sendto(ka.PING, (self.LOOP, ka.PORT))
+                if peer.recvfrom(64)[0] == ka.PING:
+                    return True
+            except (OSError, socket.timeout):
+                pass
+            time.sleep(0.1)
+        return False
+
+    def test_restart_rebinds_after_the_receive_thread_dies(self):
+        ka = KeepaliveResponder(self.LOOP, self.LOOP)
+        self.assertTrue(ka.start(), ka.error)
+        try:
+            ka._sock.close()                       # simulate a socket error in _loop
+            self.assertTrue(_wait(lambda: not ka.running))
+            self.assertTrue(ka.restart(), ka.error)
+            self.assertTrue(ka.running)
+            peer = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            peer.bind((self.LOOP, 0))
+            self.addCleanup(peer.close)
+            self.assertTrue(self._echoes(ka, peer))
+        finally:
+            ka.stop()
+
+    def test_hub_health_loop_recovers_a_dead_responder(self):
+        hub = srv.Hub.__new__(srv.Hub)            # bypass discovery; wire just enough
+        hub.keepalive = KeepaliveResponder(self.LOOP, self.LOOP)
+        hub._HEALTH_POLL = 0.05
+        self.assertTrue(hub.keepalive.start(), hub.keepalive.error)
+        hub._start_health()
+        peer = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        peer.bind((self.LOOP, 0))
+        self.addCleanup(peer.close)
+        try:
+            self.assertTrue(self._echoes(hub.keepalive, peer, 2.0))   # healthy first
+            hub.keepalive._sock.close()                               # kill the thread
+            # the port is unbound until the health loop restarts it; an echo
+            # returning again proves the loop detected the death and rebound.
+            self.assertTrue(self._echoes(hub.keepalive, peer, 4.0))
+            self.assertTrue(hub.keepalive.running)
+        finally:
+            hub._stop_health.set()
+            hub.keepalive.stop()
 
 
 if __name__ == "__main__":
