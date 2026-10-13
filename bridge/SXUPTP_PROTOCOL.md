@@ -161,15 +161,20 @@ class 0x08 (Mass Storage) / 0x06 (SCSI) / 0x50 (BOT), endpoints `0x01` OUT and
 ([`../tools/wireshark/sxuptp.lua`](../tools/wireshark/sxuptp.lua)) and parsed by
 `protocol.parse_announce()`.
 
-**Where it lands (CONFIRMED live from 192.168.2.50):** the hub pushes it to the
-client's **`:19540` grant socket** (the `client_ip:19540` bind), not the ephemeral
-connect socket — twice, once after each of connect-init and connect-commit — and
-it arrives a few ms *after* connect. So the client captures it **after** the
-OPEN_WAIT TCP match (when it's buffered), never with a pre-match blocking wait
-(that would miss the time-sensitive match window). `SxuptpClient` does this in
-`_capture_announce()` and exposes the result as `client.announce` /
-`client.dev_id` — giving a deterministic devId with no probe sweep (verified: the
-announced devId returns the matching VID:PID on a live GET_DESCRIPTOR).
+**Where it lands and when (CONFIRMED live from 192.168.2.50):** the hub pushes it
+to the client's **`:19540` grant socket** (the `client_ip:19540` bind), not the
+ephemeral connect socket, a few ms after the connect-init `OK`. The vendor order
+is **init → OK → announce → commit → empty reply** — the vendor waits for the
+announce before sending the commit. `SxuptpClient` now matches that: it does a
+short blocking wait for the announce on the grant socket (`_capture_announce(
+wait=1.0)`) **between the OK and the commit**, then commits. Matching this order
+makes the hub emit the announce exactly **once** (before commit); sending the
+commit first instead makes the hub re-announce after it. (This ordering does NOT
+affect the ~69 s wedge — survival is 70 s either way — it is a faithfulness fix
+and gives a deterministic devId up front.) The result is exposed as
+`client.announce` / `client.dev_id`, so there's no probe sweep (verified: the
+announced devId returns the matching VID:PID on a live GET_DESCRIPTOR). A
+non-blocking drain after the TCP match is kept as a safety net.
 
 ### JCP — confirmed live against the device
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 import collections
 import os
 import queue
+import select
 import socket
 import struct
 import threading
@@ -195,13 +196,18 @@ class SxuptpClient:
         udp.settimeout(1.5)
         self._udp = udp
 
-        # NOTE: do NOT insert any blocking wait between connect-commit and the
-        # TCP match. The OPEN_WAIT window is only ~0.5s.
+        # Vendor handshake order (from Packet_Dumps): connect-init -> "OK" ->
+        # device-attach announce -> connect-commit. So wait (briefly) for the
+        # announce on the grant socket BEFORE sending the commit, matching the
+        # vendor; it also gives us the devId up front. NOTE: do NOT insert a
+        # blocking wait between connect-commit and the TCP match — the OPEN_WAIT
+        # window is only ~0.5s.
         self._udp.send(p.pack_connect_init(device_mac, client_ip, self._node))
         try:
             self._udp.recv(256)   # "OK"
         except socket.timeout:
             pass
+        self._capture_announce(wait=1.0)
         self._udp.send(p.pack_connect_commit(device_mac, client_ip, self._node))
         try:
             self._udp.recv(256)
@@ -239,32 +245,51 @@ class SxuptpClient:
             time.sleep(0.08)
         raise TimeoutError("could not match the OPEN_WAIT window (power-cycle if slot busy)")
 
-    def _capture_announce(self) -> None:
-        """Non-blocking: drain the grant/connect sockets for the hub's device-attach
-        announcement (JCP 0x2908, or 0x29eb in state 2) and, if found, set
-        ``self.dev_id`` and ``self.announce`` (devId + the attached device's USB
-        descriptors — see protocol.parse_announce / SXUPTP_PROTOCOL.md). Gating on
-        the opcode avoids mistaking the "OK" reply (byte[3]==0) or a device-list
-        reply for the grant. Best-effort: if the announcement doesn't reach a
-        socket we read, dev_id is left as-is and find_dev_id() sweeps instead."""
-        for sk in (self._bc, self._udp):
-            if sk is None:
-                continue
-            try:
-                sk.settimeout(0.0)
+    def _capture_announce(self, wait: float = 0.0) -> bool:
+        """Drain the grant/connect sockets for the hub's device-attach announcement
+        (JCP 0x2908, or 0x29eb in state 2) and, if found, set ``self.dev_id`` and
+        ``self.announce`` (devId + the attached device's USB descriptors — see
+        protocol.parse_announce / SXUPTP_PROTOCOL.md). Gating on the opcode avoids
+        mistaking the "OK" reply (byte[3]==0) or a device-list reply for the grant.
+
+        ``wait`` is the max seconds to BLOCK for the announcement to arrive (0 =
+        pure non-blocking drain of what's already buffered). Returns True once an
+        announcement is captured. Best-effort: if it never arrives, dev_id is left
+        as-is and find_dev_id() sweeps instead."""
+        socks = [s for s in (self._bc, self._udp) if s is not None]
+        saved = {}
+        for s in socks:                     # go non-blocking, but restore after:
+            try:                            # self._udp keeps a 1.5s timeout the
+                saved[s] = s.gettimeout()   # handshake recv()s rely on
+                s.settimeout(0.0)
             except OSError:
-                continue
-            for _ in range(8):          # drain a few pending datagrams
+                pass
+        deadline = time.time() + wait
+        found = False
+        try:
+            while True:
+                for s in socks:             # drain everything pending right now
+                    for _ in range(8):
+                        try:
+                            d, a = s.recvfrom(4096)
+                        except (BlockingIOError, OSError):
+                            break
+                        if a[0] != self.host or len(d) < 4 or d[0] != 0x29 or d[1] not in (0x08, 0xeb):
+                            continue
+                        try:
+                            self.announce = p.parse_announce(d)
+                            self.dev_id = self.announce["dev_id"]
+                            found = True
+                        except ValueError:
+                            pass
+                if found or time.time() >= deadline:
+                    return found
+                select.select(socks, [], [], max(0.0, deadline - time.time()))
+        finally:
+            for s, to in saved.items():
                 try:
-                    d, a = sk.recvfrom(4096)
-                except (BlockingIOError, OSError):
-                    break
-                if a[0] != self.host or len(d) < 4 or d[0] != 0x29 or d[1] not in (0x08, 0xeb):
-                    continue
-                try:
-                    self.announce = p.parse_announce(d)
-                    self.dev_id = self.announce["dev_id"]
-                except ValueError:
+                    s.settimeout(to)
+                except OSError:
                     pass
 
     def reconnect(self, window: float = 5.0) -> int | None:
@@ -304,6 +329,7 @@ class SxuptpClient:
             self._udp.recv(256)
         except socket.timeout:
             pass
+        self._capture_announce(wait=1.0)   # vendor order: await announce before commit
         self._udp.send(p.pack_connect_commit(self._mac, self._client_ip, self._node))
         try:
             self._udp.recv(256)
