@@ -79,8 +79,10 @@ bridge/
 └── tools/               decode_sxuptp_pcap.py — annotate SXUPTP packet captures
 ```
 
-See [`TODO.md`](TODO.md) for remaining work (device unplug → clean USB/IP
-disconnect, reservation-steal, isochronous throughput).
+Unplugging a device (or rebooting the hub) now detaches it cleanly on the client — the
+server drops the USB/IP connection when the hub closes the channel — and the device can be
+imported again once it is back. See [`TODO.md`](TODO.md) for remaining work (reservation-steal,
+isochronous throughput).
 
 ## The firmware tooling
 

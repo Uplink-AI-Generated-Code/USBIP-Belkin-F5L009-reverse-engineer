@@ -29,7 +29,15 @@
   capture confirms the keys DO emit on ep82 (mute 0x00e2, vol± 0x00e9/ea,
   play/pause 0x00cd, next/prev 0x00b5/b6). FINAL STEP: a live press test to
   confirm event2 (Consumer Control) fires end to end through the bridge.
-- Graceful unplug -> USB/IP disconnect + optional auto-reattach (see #1).
+- Unplug -> USB/IP disconnect: DONE. A ChannelWatcher spots the hub closing a device's
+  data channel(s) (FIN on unplug; RST/timeout via TCP keepalive after a hub reboot or
+  power loss) and the server drops the client's USB/IP connection, so the kernel
+  detaches the device and the busid frees up. The hub's device list is re-read on
+  DEVLIST/IMPORT with stable busids (an absent device is hidden, a replugged or moved
+  one is importable). Verified live with a hub reboot (both devices detached cleanly,
+  re-imported afterwards). The server cannot push an attach to the client, so
+  re-attaching after a replug is still a client-side `usbip attach` (a loop/udev rule
+  on the client can automate it).
 - Serial adapters (FTDI 0403:6001, PL2303 067b:2303): WORKING. async bulk +
   FTDI-flood throttle + unlink guard + the uint16 seq-wrap fix. Both enumerate,
   bind ftdi_sio/pl2303, and pass a full kernel loopback (bidirectional + 1000-byte

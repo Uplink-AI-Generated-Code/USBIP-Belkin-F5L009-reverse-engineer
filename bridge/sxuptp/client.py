@@ -335,6 +335,7 @@ class SxuptpClient:
                 # calling disconnect() — not just on a graceful close().
                 s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER,
                              struct.pack("ii", 1, 0))
+                enable_tcp_keepalive(s)
                 self.tcp = s
                 # By now the announcement has been buffered on the grant socket
                 # during the match; a non-blocking drain reliably captures it.
@@ -467,6 +468,7 @@ class SxuptpClient:
                 except socket.timeout:
                     pass
                 s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+                enable_tcp_keepalive(s)
                 self.tcp = s
                 self._capture_announce()   # announcement is buffered by now
                 self._start_keepalive()
@@ -906,6 +908,30 @@ _MUX_TRACE = bool(os.environ.get("USBIP_TRACE"))
 
 def _mux_trace(line: str) -> None:
     os.write(2, f"[mux   {time.monotonic():.4f}] {line}\n".encode())
+
+
+def enable_tcp_keepalive(s: socket.socket) -> None:
+    """Make a data channel notice a hub that rebooted or fell off the network.
+
+    An unplug is signalled by a FIN, but a hub that loses power or reboots sends
+    nothing: the channel just goes silent and, with no traffic, looks alive
+    forever. TCP keepalive probes make a rebooted hub answer with an RST and a
+    vanished one time out, which the ChannelWatcher then reports. SXUPTP_TCP_KEEPALIVE
+    = idle seconds before the first probe (default 10; 0 turns it off); probes then
+    go every 5 s and the channel is declared dead after 3 unanswered ones."""
+    idle = int(os.environ.get("SXUPTP_TCP_KEEPALIVE", "10") or 0)
+    if idle <= 0:
+        return
+    try:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        # the idle option is TCP_KEEPIDLE on Linux, TCP_KEEPALIVE (0x10) on macOS
+        s.setsockopt(socket.IPPROTO_TCP,
+                     getattr(socket, "TCP_KEEPIDLE", getattr(socket, "TCP_KEEPALIVE", 0x10)),
+                     idle)
+        s.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 5)
+        s.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
+    except (OSError, AttributeError):
+        pass                              # best effort: FIN/RST detection still works
 
 
 class ChannelWatcher:
