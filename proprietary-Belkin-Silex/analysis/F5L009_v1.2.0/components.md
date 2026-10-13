@@ -14,7 +14,8 @@ but which has been rewritten/wrapped by Silex (not a drop-in named library).
 | **CREAM kernel** (RTOS) v3.1 | `Cream/3.1,UPnP/1.0,UPnPNULL/1.0`; `CREAM Version :` | the operating system / scheduler |
 | **CAKE** | `'CAKE' CREAM Kernel debugger Ver 1.4.2` | kernel debugger |
 | **DISH** | `'DISH' Debugging shell Version 2.5.0`; `- Restarting DISH.` | debug shell |
-| **SXUPTP** | (the USB-over-IP transport this project targets) | Silex USB peripheral transport |
+| **SXUPDEB** | `'SXUPDEB' SXUPTP debugger Ver 0.0.1` | SXUPTP-layer debug console |
+| **SXUPTP** | (the USB-over-IP transport this project targets) | Silex USB peripheral transport; "Salc" allocation/transfer-record manager @0x308000 |
 
 No third-party RTOS signatures are present anywhere — no ThreadX, Nucleus,
 µC/OS, eCos, FreeRTOS, VxWorks, RTX, embOS, or KADAK AMX. CREAM/CAKE/DISH are
@@ -43,7 +44,7 @@ algorithmic sense.
 | service | evidence | notes |
 |---|---|---|
 | DHCP/BOOTP/RARP client | `!DHCP:*`, `?DHCP:*`, `!TCPMAIN:Sending RARP request.` | custom |
-| HTTP server | `!HTTPD:Bad request %s`, `HTTP/1.1` | custom (not boa/GoAhead/appweb) |
+| HTTP server | banner **`JC-HTTPD/1.16.22`**; `?HTTPD:`/`!HTTPD:Bad request %s`, `HTTP/1.1` | Silex "JC" HTTP server, versioned (not boa/GoAhead/appweb) |
 | FTP server | `215 silex FTP daemon.`, RFC959/RFC2428 subset | custom |
 | Telnet server | `Copyright (C) 2007 Belkin International, Inc.` banner | config/status menu (see [`management_and_flash.md`]) |
 | UPnP | `silex-jp:device:NullDevice:1`, `UPnPNULL/1.0` | Silex's own — **not** Intel Portable SDK / libupnp / pupnp |

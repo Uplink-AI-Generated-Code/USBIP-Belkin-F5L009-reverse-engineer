@@ -68,6 +68,28 @@
 0x003159b0  tcp_consume_job_event       # return [conn+0x16] (job-event); if [conn+0x128] bit15 set, wait/consume via 0x33493c first
 0x0031a044  tcp_abort_close             # active close/abort: set close flag 0x20000 in [conn+0x128], dispatch on TCP state via 0x318cc8 (-> FIN/RST), arm timer type5. r1=0,r2=-1 from conn_close
 0x0030817c  sxuptp_data_pump            # job allocator/dispatcher (get_tick -> [job+0x10] create time); not a per-conn active pump
+
+# --- SXUPTP "Salc" allocation/transfer-record manager (0x308000 region) ------
+# Salc = SXUPTP ALloCation: an in-flight USB transfer record (CBW/data/CSW) held
+# on a global queue (head @0x2f02c0, lock @0x2f01e0). Debug strings tagged
+# "SXUP_ALC:". THIS LAYER CONTAINS THE ~69s WEDGE (see tcp_connection_and_keepalive.md).
+0x00308038  sxuptp_debugger_init        # registers the 'SXUPDEB' SXUPTP debugger Ver 0.0.1 console (cmd tables @0x2f01b0/0x2f01a4)
+0x0030807c  salc_init                   # init a Salc record: [+8]=0xc15d, zero resent-flag[+0xc]/tick[+0x10]/age[+0x14]/link[+0x28]
+0x003080a4  salc_dequeue                # pop/find a Salc from the queue @0x2f02c0 (returns record or 0)
+0x003080f0  salc_free                   # release a Salc; updates the per-port link bitmask in [job+0x18] via [devctx+0xec]; "SXUP_ALC: free salc"
+0x00308260  salc_drain_job              # free all Salcs belonging to a job ("remove from Old Salc"/"remove Salcq"); called by sxuptp_conn_close
+0x00308318  sxuptp_salc_watchdog        # PERIODIC (called each service tick from 0x302e64). Per Salc: if idle (now-[salc+0x10])>1000t and not yet resent([salc+0xc]!=1) -> SXUPTP-resend the record (0x31a444/0x31ae5c), reset [salc+0x10], set [salc+0xc]=1. If age [salc+0x14] > 0x176f (5999 ~= 69s) -> log "?SXUP_ALC: T/O!" + "SXUP_ALC: Send RST!", set sj_graceful[job+0xe0]=1, call sxuptp_job_teardown_by_devctx (0x302ae0). THIS emits the ~69s RST.
+0x00302ae0  sxuptp_job_teardown_by_devctx # find job by devctx (0x337148 match over job table), set sj_state[job+4]=3 (teardown) -> FSM -> conn_close -> RST
+#
+# Salc record fields (names this project; stride ~0x2c+):
+#   +0x04  sa_id         record id/seq (logged %lx)
+#   +0x08  sa_magic      init'd to 0xc15d
+#   +0x0c  sa_resent     resent flag (halfword; set 1 after a watchdog resend)
+#   +0x10  sa_lasttick   last-activity tick (reset on resend; vs 1000t resend gate)
+#   +0x14  sa_age        age/retry counter; > 5999 -> RST (increment site is
+#                        register-indirect, not yet pinned -- dynamic next step)
+#   +0x20  sa_job        owning SXUPTP job back-pointer
+#   +0x28  sa_link       secondary list link
 0x0030481c  sxuptp_tcp_msg_parser       # parse 24-byte data-channel header; dispatch by category
 0x003041e0  sxuptp_dispatch_pending_xfers  # process pending transfers; sb==2 -> intr-in queue read (0x304574)
 0x00303c70  sxuptp_build_msg_record     # ~0x40-byte outbound record

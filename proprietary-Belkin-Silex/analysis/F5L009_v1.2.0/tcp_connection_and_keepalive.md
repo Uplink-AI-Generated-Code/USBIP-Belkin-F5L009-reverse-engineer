@@ -55,6 +55,42 @@ across a vendor transfer vs ours, or instrument the recv return code — rather 
 more static tracing. What *is* firmly established: the RST is the SXUPTP job
 teardown reacting to a negative recv, not a self-firing TCP timer.
 
+### RESOLVED 2026-10-13 — the 69 s RST is the SXUPTP "Salc" watchdog
+
+Disassembling the `0x308000` SXUPTP allocation layer found the actual trigger.
+`sxuptp_salc_watchdog` (`0x308318`) runs **every SXUPTP service tick** (from the
+service loop `0x302e64`) and walks the global queue of in-flight **Salc** records
+(`SXUP_ALC` = SXUPTP allocations: the CBW/data/CSW transfer records; queue head
+`@0x2f02c0`). For each Salc:
+
+- **resend:** if it has been idle `(now − sa_lasttick[+0x10]) > 1000` ticks and
+  has not yet been resent (`sa_resent[+0x0c] != 1`), it **re-sends the record at
+  the SXUPTP layer** (`0x31a444`/`0x31ae5c`), resets `sa_lasttick`, sets
+  `sa_resent=1`. (This is the real retransmit — at the Salc layer, not TCP; it
+  explains why inducing *TCP* retransmits via dnctl did nothing.)
+- **timeout → RST:** if the record's age `sa_age[+0x14]` exceeds **`0x176f` =
+  5999** (≈ 69 s at the shared ~11.5 ms tick), it logs
+  `?SXUP_ALC: T/O![%lx]<%I>` then **`SXUP_ALC: Send RST![%lx](%s)`**, sets
+  `sj_graceful[job+0xe0]=1`, and calls `sxuptp_job_teardown_by_devctx`
+  (`0x302ae0`) which sets `sj_state[job+4]=3`. The FSM then runs teardown →
+  `sxuptp_conn_close` → `tcp_abort_close` → **RST**.
+
+So the `recv`-goes-negative path above is *driven by this*: the watchdog flips
+the job to teardown, and the socket then reports the close. The `5999` constant is
+the long-sought ~69 s lease, and the literal `Send RST!` string is the
+confirmation.
+
+**Still open (now a precise, Salc-level question):** what increments `sa_age`
+`[salc+0x14]`, and why the vendor avoids reaching 5999 while we don't. The
+increment site is register-indirect (not yet pinned statically). Working
+hypothesis: a **persistent, never-retired Salc** (e.g. a standing bulk-IN or
+interrupt record created at channel setup) ages out at ~69 s *regardless of other
+traffic* — which would explain why idle 1 Hz TUR and continuous bulk both wedge
+at the same time. Confirm dynamically by watching the Salc queue / `sa_age` on the
+live hub (vendor vs ours), or pin the `sa_age` increment and the condition that
+resets/retires the Salc. Symbols: [`ram/symbols.txt`](ram/symbols.txt), SXUPTP
+"Salc" section.
+
 ## RETRACED 2026-10-13 — the wedge is NOT a TCP-layer timer
 
 > A full fresh trace of the state machine (tcp_set_state, tcp_arm_open_timer, the
