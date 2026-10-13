@@ -47,5 +47,9 @@
   first bytes arrive before the first bulk-IN URB is outstanding) — cosmetic, no
   mid-stream loss; could pre-arm a read on open if it ever matters.
 - Interrupt OUT endpoints (not yet supported; HID keyboards don't need it).
-- Try a real multi-device session (keyboard + flash + the serial loopback pair)
-  for concurrency behavior.
+- Multi-device concurrency — DONE (2026-10-13). Four devices imported at once
+  (flash HS, composite keyboard LS incl. Consumer-Control, PL2303 + FTDI FS) and
+  driven simultaneously for 30 s via the Linux usbip client: ~80 MB flash reads +
+  serial writes to both ports + 399 key / 77 media events, no resets/errors, all
+  4 alive after. Concurrent multi-device works (host-level keepalive covers all
+  channels); see bridge/usbip/CLIENT.md "What to watch for" #2.

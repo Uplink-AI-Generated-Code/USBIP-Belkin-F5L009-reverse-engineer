@@ -169,9 +169,14 @@ minimal.)
 
 1. **Isochronous is not implemented** (webcams/audio won't work). Mass storage
    and HID (keyboards) use control/bulk/interrupt only, which are implemented.
-2. **One device at a time** is the safe assumption: the server shares a single
-   SXUPTP session socket and serializes attaches. Importing a second device
-   while one is attached is untested.
+2. **Multiple devices concurrently: VERIFIED working** (2026-10-13). The server
+   shares one SXUPTP session socket and serializes *attaches*, but attached
+   devices then run on independent data channels. A stress run imported four at
+   once — flash (HS), the composite keyboard (LS, incl. its Consumer-Control
+   channel), and both serial adapters (PL2303 + FTDI, FS) — and drove them
+   simultaneously for 30 s: ~80 MB of flash reads, serial writes to both ports,
+   and 399 key + 77 media events, with no resets, errors, or disconnects. The
+   single host-level keepalive covers all channels at once.
 3. **Client IP must stay non-gateway** on the Mac side; if the alias is lost
    (e.g. after toggling Internet Sharing) attaches fail until it's re-added.
 4. **Port 3240** must be free of any other `usbipd` (see the note above).
