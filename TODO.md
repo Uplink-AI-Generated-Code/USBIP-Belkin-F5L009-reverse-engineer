@@ -48,3 +48,10 @@
   serial writes to both ports + 399 key / 77 media events, no resets/errors, all
   4 alive after. Concurrent multi-device works (host-level keepalive covers all
   channels); see bridge/usbip/CLIENT.md "What to watch for" #2.
+- Startup bind checks — DONE (2026-10-13). The server exits 1 if any socket
+  (UDP 19540 grant, UDP session, keepalive :49501, TCP 3240) fails to bind, and
+  KeepaliveResponder reports bind/receive/echo failures loudly (stderr, .error,
+  .running). Open gap: the keepalive socket uses SO_REUSEPORT (and the grant
+  socket SO_REUSEADDR) on purpose, so a second bridge instance may bind :49501
+  without error; it was only caught via 19540 and 3240 in testing. Consider an
+  explicit single-instance guard (e.g. a lock file) if running two ever matters.
