@@ -896,7 +896,9 @@ class ChannelMux:
         self._pending: dict[int, "collections.deque"] = {} # intr ep -> URBs awaiting a report
         self._reports: dict[int, "collections.deque"] = {} # intr ep -> reports awaiting a URB
         self._bulk_in: set[int] = set()                    # registered bulk-IN eps
-        self._bulk_pending: dict[int, tuple] = {}          # bulk read seq -> (urb, complete, ep)
+        self._bulk_pending: dict[int, list] = {}           # bulk read seq -> [urb, complete, ep, length]
+        self._bulk_deferred: dict[int, object] = {}        # id(urb) -> urb, throttled, read not yet sent
+        self._bulk_spill: dict[int, "collections.deque"] = {}  # bulk ep -> data of reads whose URB was unlinked
         self._next_read_at: dict[int, float] = {}          # bulk ep -> earliest next read (throttle)
         self._ctrl: dict[int, list] = {}                   # control/bulk-out seq -> [Event, result]
         self._err: Exception | None = None
@@ -911,6 +913,7 @@ class ChannelMux:
 
     def register_bulk_in(self, ep_addr: int) -> None:
         self._bulk_in.add(ep_addr)
+        self._bulk_spill[ep_addr] = collections.deque()
 
     # --- interrupt (async) ----------------------------------------------
     def _prime(self, ep: int) -> None:
@@ -975,25 +978,85 @@ class ChannelMux:
         """Register a kernel bulk-IN URB: issue ONE bulk_read(length) and complete
         the URB (`complete(urb, status, data)`) when its reply arrives. A reply
         shorter than `length` is a USB short packet = the data for this URB (normal
-        for a serial stream), not an error. Throttled per endpoint (see above)."""
+        for a serial stream), not an error. Throttled per endpoint (see above).
+
+        If an earlier URB on `ep` was unlinked while its read was on the wire, that
+        read cannot be recalled from the hub: this URB adopts it (or takes its
+        already-landed data) instead of issuing a new read — see cancel_urb."""
+        with self._lock:
+            spill = self._bulk_spill.get(ep)
+            if spill and not self._err:
+                data = spill.popleft()
+                if len(data) > length:                 # keep the tail for the next URB
+                    spill.appendleft(data[length:])
+                    data = data[:length]
+                ready = data
+            else:
+                ready = None
+                if not self._err:
+                    for ent in self._bulk_pending.values():
+                        # orphaned read on this ep whose reply fits this URB
+                        if ent[0] is None and ent[2] == ep and ent[3] <= length:
+                            ent[0], ent[1] = urb, complete
+                            return
+        if ready is not None:
+            complete(urb, p.STATUS_OK, ready)
+            return
+
         def send():
             with self._lock:
+                if deferred and self._bulk_deferred.pop(id(urb), None) is None:
+                    return                             # unlinked before the read went out
                 if self._err:
                     cb = (urb, complete)
                 else:
                     self.c.seq = (self.c.seq + 1) & 0xFFFF
                     seq = self.c.seq
-                    self._bulk_pending[seq] = (urb, complete, ep)
+                    self._bulk_pending[seq] = [urb, complete, ep, length]
                     self.c.tcp.sendall(p.bulk_read(self.c.dev_id, ep, length, seq=seq,
                                                    mps=self.c.ep_mps.get(ep, 512)))
                     cb = None
             if cb is not None:
                 cb[1](cb[0], EREMOTEIO_, b"")
         delay = self._next_read_at.get(ep, 0.0) - time.monotonic()
-        if delay > 0:
+        deferred = delay > 0
+        if deferred:
+            with self._lock:
+                self._bulk_deferred[id(urb)] = urb
             threading.Timer(delay, send).start()
         else:
             send()
+
+    # --- UNLINK ------------------------------------------------------------
+    def cancel_urb(self, ep: int, urb) -> bool:
+        """Withdraw a queued async URB (kernel UNLINK). True = it was still pending
+        and will now never be completed; False = not found, i.e. its completion
+        has already been taken by the reader (or ran) and will still be delivered.
+
+        The hub has no "abort read", so a read already on the wire stays there:
+          * interrupt: the poll is per-endpoint, not per-URB — dropping the URB from
+            the queue is enough; a later report goes to the next URB or the buffer.
+          * bulk-IN: the URB's read is orphaned, not forgotten. Its reply is handed
+            to the next URB on that ep (adopt in enqueue_bulk_in), or kept in
+            _bulk_spill until one arrives. Dropping it would lose serial RX bytes:
+            usbserial/FTDI unlinks its parked reads on every close/termios change,
+            and on a real HC the unread bytes would simply stay in the device FIFO.
+        """
+        with self._lock:
+            pend = self._pending.get(ep)
+            if pend is not None:
+                for item in pend:
+                    if item[0] is urb:
+                        pend.remove(item)
+                        return True
+                return False
+            if self._bulk_deferred.pop(id(urb), None) is not None:
+                return True                            # throttled; read never sent
+            for ent in self._bulk_pending.values():
+                if ent[0] is urb:
+                    ent[0] = ent[1] = None             # orphan; reply goes to the next URB
+                    return True
+            return False
 
     # --- bulk OUT (synchronous) -----------------------------------------
     def bulk_out(self, ep: int, data: bytes, timeout: float = 3.0) -> int:
@@ -1075,12 +1138,17 @@ class ChannelMux:
                             # promptly.
                             self._reprime_later(ep)
                     elif seq in self._bulk_pending:     # bulk-IN reply
-                        urb, complete, bep = self._bulk_pending.pop(seq)
+                        urb, complete, bep, _len = self._bulk_pending.pop(seq)
                         if len(data) <= self._BULK_EMPTY:  # no real payload -> pace
                             self._next_read_at[bep] = time.monotonic() + self._BULK_IDLE_DELAY
                         else:
                             self._next_read_at[bep] = 0.0
-                        done = (complete, urb, status, data)
+                        if urb is not None:
+                            done = (complete, urb, status, data)
+                        elif status == p.STATUS_OK and len(data) > self._BULK_EMPTY:
+                            # its URB was unlinked: keep the payload for the next one
+                            # (status-only FTDI replies carry nothing worth keeping)
+                            self._bulk_spill[bep].append(data)
                     else:                               # control / bulk-out ack
                         w = self._ctrl.get(seq)
                         if w is not None:
@@ -1097,7 +1165,8 @@ class ChannelMux:
                 pend_all = [(c, u) for dq in self._pending.values() for (u, c) in dq]
                 for dq in self._pending.values():
                     dq.clear()
-                pend_all += [(cb, urb) for urb, cb, _ep in self._bulk_pending.values()]
+                pend_all += [(cb, urb) for urb, cb, _ep, _len in self._bulk_pending.values()
+                             if urb is not None]
                 self._bulk_pending.clear()
             for complete, urb in pend_all:
                 try:

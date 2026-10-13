@@ -21,7 +21,9 @@ import time
 
 from ..sxuptp.client import KeepaliveResponder, SxuptpClient
 from . import protocol as u
-from .backend import Device
+from .backend import EPIPE, Device
+
+ECONNRESET = -104   # RET_UNLINK status for a URB cancelled while still pending
 
 
 class Hub:
@@ -220,32 +222,60 @@ class Handler(socketserver.BaseRequestHandler):
         """Complete an async (interrupt/bulk-IN) URB from the mux reader thread.
         Dropped if the URB was already UNLINKed by the kernel — sending a
         RET_SUBMIT for an unlinked seqnum makes the client drop the whole device
-        (seen with the FTDI, which unlinks its reads constantly)."""
+        (seen with the FTDI, which unlinks its reads constantly). If an UNLINK
+        lost the race to this completion, its RET_UNLINK (status 0, "already
+        completed") goes out right after the RET_SUBMIT, in that order."""
         with self._send_lock:
-            if cmd.seqnum not in self._inflight:
+            if self._inflight.pop(cmd.seqnum, None) is None:
                 return
-            self._inflight.discard(cmd.seqnum)
+            unl = self._unlink_after.pop(cmd.seqnum, None)
             try:
                 self.request.sendall(u.pack_ret_submit(cmd, status, data))
+                if unl is not None:
+                    self.request.sendall(u.pack_ret_unlink(unl, 0))
             except OSError:
                 pass
 
     def _urb_loop(self, dev: Device) -> None:
         self._send_lock = threading.Lock()
-        self._inflight: set[int] = set()        # seqnums of async URBs awaiting completion
+        self._inflight: dict[int, u.CmdSubmit] = {}  # async URBs awaiting completion
+        self._unlink_after: dict[int, u.CmdUnlink] = {}  # victim seqnum -> its UNLINK
         while True:
             try:
                 hdr = self._recvall(u.CMD_HDR_LEN)
+                command, cmd = u.parse_command(hdr)
             except ConnectionError:
                 return
-            command, cmd = u.parse_command(hdr)
+            except ValueError as e:              # unknown command: stream is unframed
+                print(f"[usbip] {e}; closing connection")
+                return
             if command == u.USBIP_CMD_SUBMIT:
-                if not cmd.is_in and cmd.transfer_buffer_length:
-                    cmd.transfer_buffer = self._recvall(cmd.transfer_buffer_length)
+                try:
+                    if not cmd.is_in and cmd.transfer_buffer_length:
+                        cmd.transfer_buffer = self._recvall(cmd.transfer_buffer_length)
+                    if cmd.iso_desc_len:
+                        # ISO URB: its packet descriptors follow the OUT data and
+                        # must be consumed to stay framed. The hub bridge has no
+                        # isochronous path, so fail it (-EPIPE) without touching
+                        # the device.
+                        if cmd.number_of_packets > u.MAX_ISO_PACKETS:
+                            print(f"[usbip] bogus ISO packet count "
+                                  f"{cmd.number_of_packets}; closing connection")
+                            return
+                        descs = self._recvall(cmd.iso_desc_len)
+                        with self._send_lock:
+                            try:
+                                self.request.sendall(
+                                    u.pack_ret_submit_iso_error(cmd, EPIPE, descs))
+                            except OSError:
+                                pass
+                        continue
+                except ConnectionError:
+                    return
                 if dev.is_async(cmd):
                     # completed later, on the mux reader thread, when the reply lands
                     with self._send_lock:
-                        self._inflight.add(cmd.seqnum)
+                        self._inflight[cmd.seqnum] = cmd
                     dev.enqueue_async(cmd, self._complete_async)
                 else:
                     status, data = dev.submit(cmd)
@@ -255,12 +285,25 @@ class Handler(socketserver.BaseRequestHandler):
                         except OSError:
                             pass
             elif command == u.USBIP_CMD_UNLINK:
-                # Cancel the victim async URB so its (now stale) completion is
-                # dropped, then ack the unlink.
+                # Linux stub semantics: a still-pending URB is cancelled and
+                # answered ONLY by RET_UNLINK(-ECONNRESET); one that already
+                # completed gets RET_UNLINK(0). Holding _send_lock across the
+                # cancel orders us against _complete_async (lock order: _send_lock
+                # -> mux lock; the mux never calls back holding its own lock).
                 with self._send_lock:
-                    self._inflight.discard(cmd.unlink_seqnum)
+                    victim = self._inflight.get(cmd.unlink_seqnum)
+                    if victim is not None and not dev.cancel_async(victim):
+                        # its completion is already in flight (blocked on this
+                        # lock): RET_SUBMIT must reach vhci first, then this ack.
+                        self._unlink_after[cmd.unlink_seqnum] = cmd
+                        continue
+                    if victim is not None:
+                        del self._inflight[cmd.unlink_seqnum]
+                        status = ECONNRESET
+                    else:
+                        status = 0
                     try:
-                        self.request.sendall(u.pack_ret_unlink(cmd, 0))
+                        self.request.sendall(u.pack_ret_unlink(cmd, status))
                     except OSError:
                         pass
 
