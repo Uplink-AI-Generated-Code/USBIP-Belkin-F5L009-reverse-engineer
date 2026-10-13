@@ -24,9 +24,11 @@ Two interrupt-endpoint shapes:
 """
 from __future__ import annotations
 
+import contextlib
 import os
 import socket
 import struct
+import threading
 import time
 
 from ..sxuptp.client import ChannelMux, SxuptpClient
@@ -66,21 +68,14 @@ class Device:
         # interfaces are split across these (dev02=if0, dev03=if1, ...).
         self.siblings = siblings
         self.hub = hub         # for claiming sibling nodes as secondary channels
-        self.client: SxuptpClient | None = None
-        self.info: u.UsbipDevice | None = None
-        self.resolved_dev_id: int | None = None
-        self.ep_info: dict[int, tuple[int, int]] = {}
-        self.ep_mps: dict[int, int] = {}
-        self.ep_iface: dict[int, int] = {}     # endpoint addr -> interface index
-        self.single_cfg: bytes | None = None
-        self.composite: bool = False
-        self.use_mux: bool = False
-        self.intr_in_eps: list[int] = []
-        self.bulk_in_eps: list[int] = []
-        self._async_eps: list[int] = []
-        self.mux = None                        # primary ChannelMux (control + if0)
-        self._secondary: list = []             # [(SxuptpClient, ChannelMux), ...]
-        self.ep_mux: dict[int, object] = {}    # interrupt ep addr -> owning mux
+        # True while a USB/IP client has this busid imported (set/cleared by the
+        # Hub under its claim lock, so a second IMPORT of the same busid refuses
+        # instead of opening a second channel to the same node).
+        self.in_use = False
+        # serializes detach(): the handler thread and the shutdown path may both
+        # tear the device down, and each channel must be disconnected exactly once.
+        self._detach_lock = threading.Lock()
+        self._reset_session_state()
         # Mass-storage keep-alive [OPT-IN, OFF BY DEFAULT]: the vendor driver never
         # lets the bulk pipe go quiet -- it slips a TEST_UNIT_READY (+REQUEST_SENSE)
         # onto the device every ~0.3-1 s, idle or mid-write, and interleaves ~1200
@@ -94,9 +89,6 @@ class Device:
         # SXUPTP tests (no Linux) show the hub can wedge a single 512 B write at
         # random. See memory bridge-working-usbip. So this is a best-effort aid for
         # the reliable range (tens of MB), not a guaranteed 128 MB fix.
-        self.mass_storage = False
-        self._ms_bulk_out: int | None = None
-        self._ms_bulk_in: int | None = None
         self._ka_interval = float(os.environ.get("SXMS_KEEPALIVE", "0") or 0)
         self._ka_debug = bool(os.environ.get("SXMS_KA_DEBUG"))
         # Read-drain mode: inject a READ(10) instead of a TUR. A TUR is only a
@@ -134,27 +126,76 @@ class Device:
         self._reconnect_last = 0.0
         self._reconnect_n = 0
 
+    def _reset_session_state(self) -> None:
+        """Per-import state: everything attach() derives from one session's
+        channel + descriptors. Reset on construction, at the start of every
+        attach, and after detach, so nothing (endpoint maps, mux routes, the
+        bound devId) survives into the next import of this busid."""
+        self.client: SxuptpClient | None = None
+        self.info: u.UsbipDevice | None = None
+        self.resolved_dev_id: int | None = None
+        # endpoint address -> (transfer_type, bInterval); type 3 = interrupt
+        self.ep_info: dict[int, tuple[int, int]] = {}
+        self.ep_mps: dict[int, int] = {}       # endpoint addr -> wMaxPacketSize
+        self.ep_iface: dict[int, int] = {}     # endpoint addr -> interface index
+        # A single-interface config descriptor we present to the kernel (see
+        # attach); None unless the foreign-interface fallback synthesized one.
+        self.single_cfg: bytes | None = None
+        self.composite: bool = False
+        self.use_mux: bool = False
+        # async-read endpoint addrs, in descriptor order (interrupt-IN, bulk-IN).
+        self.intr_in_eps: list[int] = []
+        self.bulk_in_eps: list[int] = []
+        self._async_eps: list[int] = []
+        self.mux = None                        # primary ChannelMux (control + if0)
+        self._secondary: list = []             # [(SxuptpClient, ChannelMux), ...]
+        self._claimed_nodes: list[str] = []    # sibling nodes this import claimed
+        self.ep_mux: dict[int, object] = {}    # interrupt ep addr -> owning mux
+        self.mass_storage = False
+        self._ms_bulk_out: int | None = None
+        self._ms_bulk_in: int | None = None
+
+    def _locked(self):
+        """The shared attach lock (or a no-op when running without a Hub)."""
+        return self._lock if self._lock is not None else contextlib.nullcontext()
+
     # --- lifecycle ------------------------------------------------------
     def attach(self, exclude: tuple[int, ...] = ()) -> u.UsbipDevice:
         """Open the SXUPTP channel and read enough descriptors to describe the
         device to USB/IP. Resolves the devId by VID:PID (the devId is a USB
         address, not the devNN index); `exclude` skips handles already bound to
-        other busids with the same VID:PID. Returns the populated UsbipDevice."""
+        other busids with the same VID:PID (under a Hub these are added
+        automatically). Returns the populated UsbipDevice.
+
+        On ANY failure every channel opened so far is disconnected before the
+        exception propagates: a channel left open keeps the node's slot reserved
+        on the hub until it is rebooted."""
+        if self.client is not None:
+            # never drop a live session's channel references (they'd leak)
+            raise RuntimeError(f"{self.busid} is already attached")
+        self._reset_session_state()
+        try:
+            return self._attach(exclude)
+        except BaseException:
+            self.detach()
+            raise
+
+    def _attach(self, exclude: tuple[int, ...]) -> u.UsbipDevice:
         c = SxuptpClient(self.host)
         if self.hub is not None:
             c._ka_enabled = False       # the Hub owns the one host-level keepalive responder
-        if self._lock is not None:
-            self._lock.acquire()
-        try:
+        self.client = c                 # stored first so detach() reaches it on failure
+        with self._locked():
+            # Resolve the devId and publish it under the attach lock: two imports
+            # of identical VID:PID devices must each see the other's handle in
+            # `exclude`, or both bind the same devId.
+            if self.hub is not None:
+                exclude = tuple(exclude) + self.hub.exclude_for(self.busid)
             c.attach(self.node, self.device_mac, self.client_ip,
                      udp=self._udp, bc=self._bc)
             c.find_dev_id(want_vid=self.vid or None, want_pid=self.pid or None,
                           exclude=exclude)
-        finally:
-            if self._lock is not None:
-                self._lock.release()
-        self.resolved_dev_id = c.dev_id
-        self.client = c
+            self.resolved_dev_id = c.dev_id
 
         dd = c.control_transfer(sx.Setup.get_descriptor(desc_type=1, desc_index=0,
                                                         length=18))
@@ -175,16 +216,6 @@ class Device:
         total = (cfg[2] | (cfg[3] << 8)) if len(cfg) >= 4 else 9
         interfaces: list[tuple[int, int, int]] = []
         max_ep_mps = 0
-        # endpoint address -> (transfer_type, bInterval); type 3 = interrupt
-        self.ep_info: dict[int, tuple[int, int]] = {}
-        # A single-interface config descriptor we present to the kernel (see
-        # self.single_cfg below); None until synthesized.
-        self.single_cfg: bytes | None = None
-        # async-read endpoint addrs, in descriptor order (interrupt-IN, bulk-IN).
-        self.intr_in_eps: list[int] = []
-        self.bulk_in_eps: list[int] = []
-        self.ep_mps: dict[int, int] = {}       # endpoint addr -> wMaxPacketSize
-        self.composite = False
         if total > 9:
             full = c.control_transfer(sx.Setup.get_descriptor(desc_type=2, desc_index=0,
                                                              length=total))
@@ -322,49 +353,68 @@ class Device:
         if iface >= len(self.siblings):
             return None
         node = self.siblings[iface]
+        if node == self.node:
+            # We ARE a later node of the composite group (imported before its
+            # primary claimed us): this interface's channel is our own, and a
+            # second channel to one node would collide on the hub.
+            raise RuntimeError(f"{self.busid} is a secondary node of a composite "
+                               f"device; import its primary busid instead")
+        if self.hub is not None:
+            # Claim BEFORE connecting so the sibling cannot be imported standalone
+            # meanwhile. If it already is, refuse the whole import rather than open
+            # a second channel to that node (or present an interface we can't
+            # serve); attach()'s cleanup disconnects what we opened so far.
+            holder = self.hub.claim_node(node)
+            if holder is not None:
+                raise RuntimeError(f"composite sibling node {node} is imported "
+                                   f"standalone as {holder}; detach it first")
+            self._claimed_nodes.append(node)
         sc = SxuptpClient(self.host)
         if self.hub is not None:
             sc._ka_enabled = False       # Hub owns the host-level keepalive responder
-        if self._lock is not None:
-            self._lock.acquire()
         try:
-            # own fresh ephemeral CONNECT socket (udp=None); shared grant socket.
-            sc.attach(node, self.device_mac, self.client_ip, udp=None, bc=self._bc)
-        finally:
-            if self._lock is not None:
-                self._lock.release()
+            with self._locked():
+                # own fresh ephemeral CONNECT socket (udp=None); shared grant socket.
+                sc.attach(node, self.device_mac, self.client_ip, udp=None, bc=self._bc)
+        except BaseException:
+            sc.disconnect()              # release the sibling's half-made job
+            raise
         sc._owns_udp = True
         sc.dev_id = dev_id                       # reuse; sibling answers no control
         sc.ep_mps = dict(self.ep_mps)            # carry real MPS on the sibling's bulk headers
-        if self.hub is not None:
-            self.hub.claim_node(node)            # hide its standalone busid
         smux = ChannelMux(sc)
         self._secondary.append((sc, smux))
         return smux
 
     def detach(self) -> None:
-        for _sc, smux in self._secondary:
-            try:
-                smux.close()
-            except Exception:
-                pass
-        for sc, _smux in self._secondary:
-            try:
-                sc.disconnect()
-            except Exception:
-                pass
-        self._secondary = []
-        if self.mux is not None:
-            try:
-                self.mux.close()
-            except Exception:
-                pass
-            self.mux = None
-        if self.client:
-            try:
-                self.client.disconnect()
-            finally:
-                self.client = None
+        """Disconnect every channel this import opened (secondaries, then the
+        primary), release claimed sibling nodes, and reset per-session state.
+        Idempotent and thread-safe: a no-op when nothing is attached."""
+        with self._detach_lock:
+            for _sc, smux in self._secondary:
+                try:
+                    smux.close()
+                except Exception:
+                    pass
+            for sc, _smux in self._secondary:
+                try:
+                    sc.disconnect()
+                except Exception:
+                    pass
+            if self.mux is not None:
+                try:
+                    self.mux.close()
+                except Exception:
+                    pass
+            if self.client is not None:
+                try:
+                    self.client.disconnect()
+                except Exception:
+                    pass
+            if self.hub is not None:
+                for node in self._claimed_nodes:
+                    self.hub.unclaim_node(node)
+            self._reset_session_state()
 
     # --- URB handling ---------------------------------------------------
     def is_async(self, cmd: u.CmdSubmit) -> bool:
@@ -400,6 +450,12 @@ class Device:
             return self._control(cmd)
         ep_addr = (ep_num | 0x80) if cmd.is_in else ep_num
         attr, interval = self.ep_info.get(ep_addr, (2, 10))
+        if cmd.is_in and self.mux is not None:
+            # The mux reader owns the primary socket and every IN endpoint it
+            # serves is async (is_async). An IN endpoint with no mux route (e.g. a
+            # foreign interface we could not reach) must not do a synchronous
+            # read on that socket -- it would race the reader for replies.
+            return EPIPE, b""
         try:
             if not cmd.is_in and self.mux is not None:      # bulk OUT (TX) via mux
                 status = self.mux.bulk_out(ep_addr, cmd.transfer_buffer)
@@ -526,6 +582,14 @@ class Device:
         bm, b_req, w_value, w_index, w_length = struct.unpack("<BBHHH", cmd.setup)
         setup = sx.Setup(bmRequestType=bm, bRequest=b_req, wValue=w_value,
                          wIndex=w_index, wLength=w_length)
+        # Serve our single-interface config descriptor (hides the foreign
+        # interface whose EP lives on another node) instead of the device's real
+        # multi-interface one -- on the mux and non-mux paths alike (interface 0
+        # may still have an interrupt EP, so the fallback can run muxed).
+        # wValue = (descType << 8) | index; 0x02 = CONFIG.
+        if (self.single_cfg is not None and bm & 0x80 and b_req == 0x06
+                and (w_value >> 8) == 0x02):
+            return 0, self.single_cfg[:w_length]
         try:
             # In composite mode the mux owns the channel; route control through it.
             if self.mux is not None:
@@ -535,12 +599,6 @@ class Device:
                 status, _ = self.mux.control(setup, cmd.transfer_buffer)
                 return (0, b"") if status == 0 else (EPIPE, b"")
             if bm & 0x80:                    # IN
-                # Serve our single-interface config descriptor (hides the foreign
-                # interface whose EP lives on another node) instead of the device's
-                # real 2-interface one. wValue = (descType << 8) | index; 0x02 = CONFIG.
-                if (self.single_cfg is not None and b_req == 0x06
-                        and (w_value >> 8) == 0x02):
-                    return 0, self.single_cfg[:w_length]
                 data = self.client.control_transfer(setup)
                 return 0, data[:w_length]
             else:                            # OUT

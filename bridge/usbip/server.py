@@ -119,18 +119,58 @@ class Hub:
                     pass
         self._grant = self._session = None
 
-    def claim_node(self, node: str) -> None:
-        """Mark a node as a composite secondary so its standalone busid refuses."""
+    def claim_node(self, node: str) -> str | None:
+        """Mark a node as a composite secondary so its standalone busid refuses.
+        Returns None on success, or the busid that already has the node imported
+        standalone (then nothing is claimed: a second channel to a node that
+        already has one would collide on the hub)."""
         with self._claim_lock:
+            busid = self._node_busid.get(node)
+            if busid is not None and self.devices[busid].in_use:
+                return busid
             self._claimed.add(node)
+            return None
+
+    def unclaim_node(self, node: str) -> None:
+        with self._claim_lock:
+            self._claimed.discard(node)
 
     def is_claimed(self, node: str) -> bool:
         with self._claim_lock:
             return node in self._claimed
 
+    def reserve(self, dev: Device) -> str | None:
+        """Mark `dev` imported. Returns None on success, else why it refuses.
+        Checked atomically with claim_node, so a node is never held both as a
+        standalone import and as a composite's secondary channel."""
+        with self._claim_lock:
+            if dev.node in self._claimed:
+                return ("secondary channel of a composite device "
+                        "(import its primary busid instead)")
+            if dev.in_use:
+                return "already imported by another client"
+            dev.in_use = True
+            return None
+
+    def release(self, dev: Device) -> None:
+        with self._claim_lock:
+            dev.in_use = False
+
+    def detach_all(self) -> None:
+        """Disconnect every device's channels (shutdown). Device.detach is a
+        no-op for a device that is not attached, so every busid is simply swept:
+        an open channel keeps the node's slot reserved until the hub reboots."""
+        for dev in self.devices.values():
+            try:
+                dev.detach()
+            except Exception as e:
+                print(f"[usbip] detach {dev.busid} at shutdown failed: {e}")
+
     def exclude_for(self, busid: str) -> tuple[int, ...]:
         """devIds already bound to OTHER busids that share this one's VID:PID, so
-        two identical devices (e.g. the two keyboards) resolve to distinct handles."""
+        two identical devices (e.g. the two keyboards) resolve to distinct handles.
+        Call with attach_lock held (Device.attach does), so a concurrent attach
+        cannot resolve the same devId in between."""
         me = self.devices[busid]
         return tuple(d.resolved_dev_id for b, d in self.devices.items()
                      if b != busid and d.resolved_dev_id is not None
@@ -155,9 +195,12 @@ class Hub:
     def devlist(self) -> list[u.UsbipDevice]:
         """Advertisement (no attach): busids + VID:PID from GET USB_DEVICE_LIST.
         Full descriptor fields are filled by IMPORT. `usbip attach -b <busid>`
-        is the real path."""
+        is the real path. Nodes claimed as a composite's secondary channel are
+        omitted: they are served through their primary busid."""
         out = []
         for busid, dev in self.devices.items():
+            if self.is_claimed(dev.node):
+                continue
             out.append(u.UsbipDevice(busid=busid, busnum=dev.busnum,
                                      devnum=dev.devnum, id_vendor=dev.vid,
                                      id_product=dev.pid, b_num_interfaces=1,
@@ -194,27 +237,34 @@ class Handler(socketserver.BaseRequestHandler):
         if dev is None:
             self.request.sendall(u.pack_import_reply(None))
             return
-        if hub.is_claimed(dev.node):
-            # secondary interface node of a composite device, already exported as
-            # part of its primary busid — not importable on its own.
-            print(f"[usbip] import {busid} refused: secondary channel of a "
-                  f"composite device (import its primary busid instead)")
+        # Refuse a secondary node of a composite (already exported as part of its
+        # primary busid) and a busid another client already has imported — a
+        # second channel to the same node would collide on the hub.
+        why = hub.reserve(dev)
+        if why is not None:
+            print(f"[usbip] import {busid} refused: {why}")
             self.request.sendall(u.pack_import_reply(None))
             return
+        imported = False
         try:
-            info = dev.attach(exclude=hub.exclude_for(busid))
-        except Exception as e:
-            print(f"[usbip] import {busid} failed: {e}")
-            self.request.sendall(u.pack_import_reply(None))
-            return
-        self.request.sendall(u.pack_import_reply(info))
-        print(f"[usbip] imported {busid} ({hub.names.get(busid)}) "
-              f"{info.id_vendor:04x}:{info.id_product:04x}")
-        try:
+            try:
+                info = dev.attach()          # cleans up its own channels on failure
+            except Exception as e:
+                print(f"[usbip] import {busid} failed: {e}")
+                self.request.sendall(u.pack_import_reply(None))
+                return
+            imported = True
+            self.request.sendall(u.pack_import_reply(info))
+            print(f"[usbip] imported {busid} ({hub.names.get(busid)}) "
+                  f"{info.id_vendor:04x}:{info.id_product:04x}")
             self._urb_loop(dev)
         finally:
+            # always disconnect (idempotent), even if the client vanished before
+            # the import reply went out: a leaked channel holds the hub slot.
             dev.detach()
-            print(f"[usbip] detached {busid}")
+            hub.release(dev)
+            if imported:
+                print(f"[usbip] detached {busid}")
 
     def _complete_async(self, cmd, status: int, data: bytes) -> None:
         """Complete an async (interrupt/bulk-IN) URB from the mux reader thread.
@@ -281,7 +331,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         hub = Hub(args.host, args.client_ip)
-    except OSError as e:
+    except (OSError, RuntimeError) as e:     # RuntimeError: no hub answered discovery
         print(f"[usbip] FATAL: not starting: {e}", file=sys.stderr)
         return 1
     print(f"[usbip] hub {args.host} mac={hub.mac.hex()}; devices:")
@@ -303,6 +353,12 @@ def main(argv: list[str] | None = None) -> int:
         pass
     finally:
         srv.shutdown()
+        srv.server_close()
+        # Handler threads are daemons and die with the process without running
+        # their own detach, so release every channel here or the hub keeps
+        # those slots reserved until it is rebooted.
+        hub.detach_all()
+        hub.close()
     return 0
 
 
