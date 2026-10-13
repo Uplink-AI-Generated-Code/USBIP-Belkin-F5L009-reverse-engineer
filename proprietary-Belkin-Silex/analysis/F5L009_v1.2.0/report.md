@@ -1,5 +1,8 @@
 # Static analysis — image.bin
 
+> Software component inventory / provenance (what the firmware is built from —
+> Silex CREAM platform + a BSD-derived TCP/IP stack): [`components.md`](components.md).
+
 - Exec base **0x01020000**, size **0x6e9a0** (453024 bytes)
 - Flat image from Network USB Hub v1.2.0, 940 records
 - Reset/entry: **0x01020480** (file off 0x480)
