@@ -437,6 +437,15 @@ class Device:
         else:                                # bulk-IN
             mux.enqueue_bulk_in(ep_addr, cmd, cb, cmd.transfer_buffer_length or 64)
 
+    def cancel_async(self, cmd: u.CmdSubmit) -> bool:
+        """Withdraw an async IN URB handed to enqueue_async (kernel UNLINK).
+        True = cancelled, its completion will never run; False = its completion
+        is already on its way (see ChannelMux.cancel_urb)."""
+        mux = self.ep_mux.get((cmd.ep & 0x0F) | 0x80)
+        if mux is None:
+            return False
+        return mux.cancel_urb((cmd.ep & 0x0F) | 0x80, cmd)
+
     def submit(self, cmd: u.CmdSubmit) -> tuple[int, bytes]:
         """Execute a synchronous SUBMIT -> (usbip_status, in_data). status 0 = OK.
 

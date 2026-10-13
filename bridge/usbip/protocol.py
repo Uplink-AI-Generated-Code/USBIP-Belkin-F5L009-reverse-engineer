@@ -120,7 +120,14 @@ _BASIC = struct.Struct(">IIIII")        # command, seqnum, devid, direction, ep
 _SUBMIT_TAIL = struct.Struct(">IIIII8s")   # flags, buflen, start, npkts, interval, setup
 _RET_SUBMIT_TAIL = struct.Struct(">IIIII8s")  # status, actual_len, start, npkts, err, pad
 _UNLINK_TAIL = struct.Struct(">I24s")      # (unlink_)seqnum, pad
+_ISO_DESC = struct.Struct(">IIIi")         # offset, length, actual_length, status
 CMD_HDR_LEN = 48
+
+# number_of_packets for a non-ISO URB (vhci sends 0; the protocol doc says 0xffffffff)
+NO_ISO = 0xFFFFFFFF
+# Sanity cap on ISO packets per URB, so a garbage header can't make us try to
+# read gigabytes (the kernel's own limit is USBIP_MAX_ISO_PACKETS = 1024).
+MAX_ISO_PACKETS = 1024
 
 
 @dataclass
@@ -140,6 +147,14 @@ class CmdSubmit:
     @property
     def is_in(self) -> bool:
         return self.direction == USBIP_DIR_IN
+
+    @property
+    def iso_desc_len(self) -> int:
+        """Bytes of iso_packet_descriptor array that follow this SUBMIT's OUT data
+        (16 per packet) -- they are on the wire even for IN, so they must be read
+        to keep the stream framed."""
+        n = self.number_of_packets
+        return 0 if n in (0, NO_ISO) else n * _ISO_DESC.size
 
 
 @dataclass
@@ -167,11 +182,37 @@ def parse_command(hdr: bytes) -> tuple[int, object]:
 
 
 def pack_ret_submit(cmd: CmdSubmit, status: int, data: bytes = b"") -> bytes:
-    """Build USBIP_RET_SUBMIT. `data` is the IN payload (ignored for OUT)."""
-    actual = len(data) if cmd.is_in else cmd.transfer_buffer_length
+    """Build USBIP_RET_SUBMIT. `data` is the IN payload (ignored for OUT).
+
+    IN data is clamped to the URB's buffer: vhci treats actual_length >
+    transfer_buffer_length as a protocol error and drops the whole device. A
+    failed OUT reports 0 bytes transferred, not the full request."""
+    if cmd.is_in:
+        data = data[:cmd.transfer_buffer_length]
+        actual = len(data)
+    else:
+        data = b""
+        actual = cmd.transfer_buffer_length if status == 0 else 0
     hdr = _BASIC.pack(USBIP_RET_SUBMIT, cmd.seqnum, cmd.devid, cmd.direction, cmd.ep)
     hdr += _RET_SUBMIT_TAIL.pack(status & 0xFFFFFFFF, actual, 0, 0, 0, b"\x00" * 8)
-    return hdr + (data if cmd.is_in else b"")
+    return hdr + data
+
+
+def pack_ret_submit_iso_error(cmd: CmdSubmit, status: int, iso_descs: bytes) -> bytes:
+    """Fail an ISO SUBMIT (the hub bridge has no isochronous support).
+
+    For an ISO URB vhci reads number_of_packets (taken from OUR reply) descriptors
+    after the RET_SUBMIT and requires sum(actual_length) == actual_length, so
+    echo the client's descriptors with actual_length 0 and the error status --
+    this also leaves the driver's urb->number_of_packets untouched."""
+    n = len(iso_descs) // _ISO_DESC.size
+    out = b""
+    for i in range(n):
+        off, length, _act, _st = _ISO_DESC.unpack_from(iso_descs, i * _ISO_DESC.size)
+        out += _ISO_DESC.pack(off, length, 0, status)
+    hdr = _BASIC.pack(USBIP_RET_SUBMIT, cmd.seqnum, cmd.devid, cmd.direction, cmd.ep)
+    hdr += _RET_SUBMIT_TAIL.pack(status & 0xFFFFFFFF, 0, 0, n, n, b"\x00" * 8)
+    return hdr + out
 
 
 def pack_ret_unlink(cmd: CmdUnlink, status: int) -> bytes:
@@ -210,6 +251,32 @@ def _selftest() -> None:
     assert struct.unpack_from(">I", ret, 20)[0] == 0           # status  (@ +20)
     assert struct.unpack_from(">I", ret, 24)[0] == 18          # actual_length (@ +24)
     assert ret[CMD_HDR_LEN:] == desc
+    assert sub.iso_desc_len == 0
+
+    # IN clamp: a reply longer than the URB buffer must not overrun it
+    sub.transfer_buffer_length = 8
+    ret = pack_ret_submit(sub, 0, desc)
+    assert struct.unpack_from(">I", ret, 24)[0] == 8 and ret[CMD_HDR_LEN:] == desc[:8]
+
+    # OUT: full length on success, 0 on error; never any trailing data
+    out = CmdSubmit(8, d.devid, USBIP_DIR_OUT, 2, 0, 64, 0, NO_ISO, 0, b"\x00" * 8,
+                    b"x" * 64)
+    assert out.iso_desc_len == 0
+    ret = pack_ret_submit(out, 0)
+    assert len(ret) == CMD_HDR_LEN and struct.unpack_from(">I", ret, 24)[0] == 64
+    ret = pack_ret_submit(out, -32)
+    assert struct.unpack_from(">i", ret, 20)[0] == -32
+    assert struct.unpack_from(">I", ret, 24)[0] == 0
+
+    # ISO: descriptors are 16 B/packet; the error reply echoes them, zeroed
+    iso = CmdSubmit(10, d.devid, USBIP_DIR_IN, 3, 0, 384, 0, 3, 1, b"\x00" * 8)
+    assert iso.iso_desc_len == 48
+    descs = b"".join(_ISO_DESC.pack(i * 128, 128, 0, 0) for i in range(3))
+    ret = pack_ret_submit_iso_error(iso, -32, descs)
+    assert len(ret) == CMD_HDR_LEN + 48
+    st, act, _sf, npk, ec = struct.unpack_from(">iIIII", ret, 20)
+    assert (st, act, npk, ec) == (-32, 0, 3, 3)
+    assert _ISO_DESC.unpack_from(ret, CMD_HDR_LEN + 16) == (128, 128, 0, -32)
 
     # UNLINK round-trip
     u = _BASIC.pack(USBIP_CMD_UNLINK, 9, d.devid, 0, 0) + _UNLINK_TAIL.pack(7, b"\x00" * 24)
