@@ -91,6 +91,45 @@ live hub (vendor vs ours), or pin the `sa_age` increment and the condition that
 resets/retires the Salc. Symbols: [`ram/symbols.txt`](ram/symbols.txt), SXUPTP
 "Salc" section.
 
+### Tier-1 live observability recon (2026-10-13) — what the network exposes
+
+Goal: watch the wedge without opening the hub. Findings:
+
+- **Log pipeline (RE'd):** `printf_log` filters by level (`#`=1 err, `!`=2 warn,
+  `?`=3 info, none=4 debug) against `active_log_level` (`0x35f1c2`), then
+  `putc_logbuf` fans every char to BOTH the console mux `putc_out` (UART) AND a
+  RAM ring buffer (`0x2f620c`). The `SXUP_ALC` lines are level 3/4.
+- **Port scan** of 192.168.2.3: only **21 (FTP), 23 (telnet), 80 (HTTP), 19540
+  (SXUPTP)**. No debug-console socket → CAKE/DISH/SXUPDEB are **UART-only**.
+- **FTP** (root / empty password) logs in but the filesystem is empty — not a log
+  source.
+- **JCP read-only reports over UDP 19540:** `GET CONTEXT`/`MENU_DATA`/`ENUM_DATA`
+  return config/enum data (not runtime state); **`EXEC PRINT DIAGNOSTIC` and
+  `PRINT CONFIGDATA` return only an 8-byte empty ack** — their output goes to the
+  console/log, not the JCP reply. So the printf ring buffer (and `sa_age`) is
+  **not reachable over the network**.
+- **Web event log** `/en/mnt/loginfo.htm` (login = empty password) is a separate
+  **application-level USB event log** — not the printf buffer — but it timestamps
+  session lifetimes with the client IP. **It confirms the wedge black-box:**
+
+  | client | `Host used` → `Host not used` | lifetime |
+  |---|---|---|
+  | **.50 (our bridge)** | 01:52:30 → 01:53:40 | **70 s** |
+  | **.50 (our bridge)** | 02:14:14 → 02:15:24 | **70 s** |
+  | .36 (Windows vendor) | 02:11:33 → 02:14:02 | 149 s |
+  | .36 (Windows vendor) | 01:57:26 → 02:11:25 | ~14 min |
+
+  Our sessions die at a flat ~70 s (= the 5999-tick Salc lease); the vendor's
+  don't — exactly the `SXUP_ALC: Send RST!` path, observed from the network.
+
+**Tier-1 conclusion:** the event log is a usable **zero-hardware wedge oracle**
+(precise teardown timestamps + host attribution), good enough to run black-box
+experiments on *what extends the `Host used` lifetime* (i.e. what resets/retires
+the aging Salc) by varying client behaviour and reading session length back. But
+to see `SXUP_ALC: Send RST!` directly, or to watch `sa_age` tick, needs the
+**UART (Tier 2)** — where the CAKE kernel debugger's memory-examine can read
+`[salc+0x14]` live. Tier 3 (JTAG/SWD) is a pipe dream (no equipment).
+
 ## RETRACED 2026-10-13 — the wedge is NOT a TCP-layer timer
 
 > A full fresh trace of the state machine (tcp_set_state, tcp_arm_open_timer, the

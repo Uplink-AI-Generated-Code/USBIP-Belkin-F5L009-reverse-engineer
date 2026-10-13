@@ -4,7 +4,7 @@
 # (adapt column order as your importer needs).
 
 # --- C runtime / helpers ---------------------------------------------------
-0x00336f24  printf_log
+0x00336f24  printf_log                # fmt-string's first char sets LEVEL: '#'=1 err, '!'=2 warn, '?'=3 info, none=4 debug. Emitted only if active log_level(0x35f1c2) >= level. (So "SXUP_ALC: Send RST!"=4, "?SXUP_ALC:T/O"=3.)
 0x00337070  strcpy
 0x00337084  strncpy
 0x003370a8  strcat
@@ -15,11 +15,19 @@
 0x003362bc  put_le16
 0x003362c4  get_le16
 0x003362e0  get_le32
-0x003364b8  putc_logbuf
+0x003364b8  putc_logbuf               # per-char log sink: ALWAYS -> putc_out (console/UART mux); AND, if log_level!=0, append to RAM ring buffer (base 0x2f620c, size 0x2f6208, head 0x2f6206, count 0x2f6204)
 0x00336544  puts_log
 0x00336518  put_crlf
-0x00339700  str_out
-0x0033967c  putc_out
+0x00336358  log_enable                # r0==1 -> log_level(0x35f1c2) = configured level(0x35f1c0); r0==0 -> log_level=0 (off)
+0x0033637c  log_is_enabled            # returns 1 if active log_level == configured level
+0x00339700  str_out                   # write a string to the console output-device mux
+0x0033967c  putc_out                  # console output mux: fan a char to each registered output device (table @0x2f62a0, count 0x2f6220, flags 0x2f6240). A UART driver registers here = the Tier-2 serial path.
+# logging globals: 0x35f1c0 configured_log_level, 0x35f1c2 active_log_level,
+# 0x2f620c logbuf_base, 0x2f6208 logbuf_size, 0x2f6206 logbuf_head, 0x2f6204 logbuf_count.
+# NOTE (Tier-1 live 2026-10-13): the printf ring buffer is NOT exposed over the
+# network (web "event log" loginfo.htm is a separate app-level USB-event log;
+# JCP EXEC PRINT DIAGNOSTIC/CONFIGDATA return an empty ack, output goes to console).
+# Reading SXUP_ALC/#TCP debug lines (and sa_age) needs the UART (Tier 2).
 0x00339fa0  thumb_to_arm_veneer
 0x00339fb8  thumb_to_arm_icall_veneer
 0x00335e70  malloc_block
